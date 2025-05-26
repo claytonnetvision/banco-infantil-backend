@@ -1,0 +1,3 @@
+@echo off
+echo Iniciando o backend...
+start cmd /k node index.js
