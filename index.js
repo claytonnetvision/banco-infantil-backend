@@ -12,10 +12,8 @@ const crypto = require('crypto');
 const desafiosRouter = require('./routes/desafios');
 const app = express();
 
-// Configuração do CORS
-app.use(cors({
-    origin: ['http://localhost:3000', 'https://banco-infantil-frontend-clean.vercel.app']
-}));
+// Configuração do CORS - Permitir todas as origens
+app.use(cors());
 app.use(express.json());
 
 console.log('Iniciando o servidor backend...');
