@@ -1,3 +1,4 @@
+
 require('dotenv').config();
 const express = require('express');
 const { Pool } = require('pg');
@@ -10,7 +11,11 @@ const AdmZip = require('adm-zip');
 const crypto = require('crypto');
 const desafiosRouter = require('./routes/desafios');
 const app = express();
-app.use(cors());
+
+// Configuração do CORS
+app.use(cors({
+    origin: ['http://localhost:3000', 'https://banco-infantil-frontend-clean.vercel.app']
+}));
 app.use(express.json());
 
 console.log('Iniciando o servidor backend...');
@@ -67,6 +72,7 @@ pool.connect(async (err, client, release) => {
 app.use('/Uploads', express.static(uploadDir));
 
 // Usar router de desafios
+console.log('Carregando rotas de desafios');
 app.use('/desafios', desafiosRouter);
 
 // Rota de teste
