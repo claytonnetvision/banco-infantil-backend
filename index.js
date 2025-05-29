@@ -8,7 +8,7 @@ const fs = require('fs');
 const fsPromises = require('fs').promises;
 const AdmZip = require('adm-zip');
 const crypto = require('crypto');
-
+const desafiosRouter = require('./routes/desafios');
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -64,7 +64,10 @@ pool.connect(async (err, client, release) => {
 });
 
 // Servir arquivos de upload
-app.use('/uploads', express.static(uploadDir));
+app.use('/Uploads', express.static(uploadDir));
+
+// Usar router de desafios
+app.use('/desafios', desafiosRouter);
 
 // Rota de teste
 app.get('/health', (req, res) => {
@@ -72,7 +75,7 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'Servidor ativo' });
 });
 
-// Endpoint de cadastro (pai e filho)
+// Endpoint de cadastro (pai e criança)
 app.post('/cadastro', async (req, res) => {
   console.log('Requisição recebida em /cadastro:', req.body);
   const { pai, filho } = req.body;
@@ -80,8 +83,8 @@ app.post('/cadastro', async (req, res) => {
 
   try {
     if (!pai || !pai.nome_completo || !pai.senha || !pai.telefone || !pai.cpf || !pai.email) {
-      console.log('Dados do pai incompletos');
-      return res.status(400).json({ error: 'Dados do pai incompletos' });
+      console.log('Dados do responsável incompletos');
+      return res.status(400).json({ error: 'Dados do responsável incompletos' });
     }
 
     const client = await pool.connect();
@@ -92,27 +95,27 @@ app.post('/cadastro', async (req, res) => {
         [pai.nome_completo, pai.senha, pai.telefone, pai.cpf, pai.email]
       );
       paiId = paiResult.rows[0].id;
-      console.log('Pai cadastrado com ID:', paiId);
+      console.log('Responsável cadastrado com ID:', paiId);
 
-      // Criar conta para o pai
+      // Criar conta para o responsável
       await client.query('INSERT INTO contas (pai_id, saldo) VALUES ($1, $2)', [paiId, 0.00]);
 
-      let filhoData = null;
+      let criancaData = null;
       if (filho && filho.nome_completo && filho.senha && filho.telefone && filho.email) {
         const filhoResult = await client.query(
           'INSERT INTO filhos (nome_completo, senha, telefone, email, pai_id, icone, chave_pix) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, email',
           [filho.nome_completo, filho.senha, filho.telefone, filho.email, paiId, filho.icone || 'default.png', filho.email]
         );
-        filhoData = filhoResult.rows[0];
-        console.log('Filho cadastrado com ID:', filhoData.id);
+        criancaData = filhoResult.rows[0];
+        console.log('Criança cadastrada com ID:', criancaData.id);
 
-        // Criar conta para o filho
-        await client.query('INSERT INTO contas_filhos (filho_id, saldo) VALUES ($1, $2)', [filhoData.id, 0.00]);
+        // Criar conta para a criança
+        await client.query('INSERT INTO contas_filhos (filho_id, saldo) VALUES ($1, $2)', [criancaData.id, 0.00]);
       }
 
       res.status(201).json({
         user: { id: paiId, email: paiResult.rows[0].email, tipo: 'pai' },
-        filho: filhoData,
+        crianca: criancaData,
         message: 'Cadastro realizado com sucesso!'
       });
     } finally {
@@ -142,13 +145,13 @@ app.post('/login', async (req, res) => {
         await client.query('SET search_path TO banco_infantil');
         let result = await client.query('SELECT id, email, \'pai\' as tipo FROM pais WHERE email = $1 AND senha = $2', [email, senha]);
         if (result.rows.length > 0) {
-          console.log('Login bem-sucedido para pai:', email);
+          console.log('Login bem-sucedido para responsável:', email);
           return res.json({ user: result.rows[0], message: 'Login bem-sucedido!' });
         }
 
         result = await client.query('SELECT id, email, \'filho\' as tipo, chave_pix FROM filhos WHERE email = $1 AND senha = $2', [email, senha]);
         if (result.rows.length > 0) {
-          console.log('Login bem-sucedido para filho:', email);
+          console.log('Login bem-sucedido para criança:', email);
           return res.json({ user: result.rows[0], message: 'Login bem-sucedido!' });
         }
 
@@ -177,7 +180,7 @@ app.post('/perfil/foto', upload.single('foto'), async (req, res) => {
 
   try {
     if (!paiId || !foto) {
-      return res.status(400).json({ error: 'ID do pai ou foto ausente' });
+      return res.status(400).json({ error: 'ID do responsável ou foto ausente' });
     }
 
     const client = await pool.connect();
@@ -194,9 +197,9 @@ app.post('/perfil/foto', upload.single('foto'), async (req, res) => {
   }
 });
 
-// Endpoint para atualizar o ícone do filho
+// Endpoint para atualizar o ícone da criança
 app.post('/update-icon/:filhoId', async (req, res) => {
-  console.log('Requisição recebida em /update-icon/:filhoId');
+  console.log('Requisição recebida em /update-icon/:filhoId:', req.params.filhoId);
   const { filhoId } = req.params;
   const { icon } = req.body;
 
@@ -210,7 +213,7 @@ app.post('/update-icon/:filhoId', async (req, res) => {
       await client.query('SET search_path TO banco_infantil');
       const result = await client.query('UPDATE filhos SET icone = $1 WHERE id = $2 RETURNING icone', [icon, filhoId]);
       if (result.rows.length === 0) {
-        return res.status(404).json({ error: 'Filho não encontrado' });
+        return res.status(404).json({ error: 'Criança não encontrada' });
       }
 
       res.status(200).json({ message: 'Ícone atualizado com sucesso', icone: result.rows[0].icone });
@@ -219,13 +222,13 @@ app.post('/update-icon/:filhoId', async (req, res) => {
     }
   } catch (error) {
     console.error('Erro ao atualizar ícone:', error.stack);
-    res.status(500).json({ error: 'Erro ao atualizar ícone' });
+    res.status(500).json({ error: 'Erro ao atualizar ícone', details: error.message });
   }
 });
 
-// Endpoint para atualizar o fundo do perfil do filho
+// Endpoint para atualizar o fundo do perfil da criança
 app.post('/update-background/:filhoId', async (req, res) => {
-  console.log('Requisição recebida em /update-background/:filhoId');
+  console.log('Requisição recebida em /update-background/:filhoId:', req.params.filhoId);
   const { filhoId } = req.params;
   const { background } = req.body;
 
@@ -239,7 +242,7 @@ app.post('/update-background/:filhoId', async (req, res) => {
       await client.query('SET search_path TO banco_infantil');
       const result = await client.query('UPDATE filhos SET background = $1 WHERE id = $2 RETURNING background', [background, filhoId]);
       if (result.rows.length === 0) {
-        return res.status(404).json({ error: 'Filho não encontrado' });
+        return res.status(404).json({ error: 'Criança não encontrada' });
       }
 
       res.status(200).json({ message: 'Fundo atualizado com sucesso', background: result.rows[0].background });
@@ -248,13 +251,13 @@ app.post('/update-background/:filhoId', async (req, res) => {
     }
   } catch (error) {
     console.error('Erro ao atualizar fundo:', error.stack);
-    res.status(500).json({ error: 'Erro ao atualizar fundo' });
+    res.status(500).json({ error: 'Erro ao atualizar fundo', details: error.message });
   }
 });
 
-// Endpoint para consultar saldo do pai
+// Endpoint para consultar saldo do responsável
 app.get('/conta/saldo/:paiId', async (req, res) => {
-  console.log('Requisição recebida em /conta/saldo');
+  console.log('Requisição recebida em /conta/saldo:', req.params.paiId);
   const { paiId } = req.params;
 
   try {
@@ -271,13 +274,13 @@ app.get('/conta/saldo/:paiId', async (req, res) => {
     }
   } catch (error) {
     console.error('Erro ao consultar saldo:', error.stack);
-    res.status(500).json({ error: 'Erro ao consultar saldo' });
+    res.status(500).json({ error: 'Erro ao consultar saldo', details: error.message });
   }
 });
 
-// Endpoint para consultar saldo do filho
+// Endpoint para consultar saldo da criança
 app.get('/conta/saldo/filho/:filhoId', async (req, res) => {
-  console.log('Requisição recebida em /conta/saldo/filho');
+  console.log('Requisição recebida em /conta/saldo/filho:', req.params.filhoId);
   const { filhoId } = req.params;
 
   try {
@@ -286,21 +289,21 @@ app.get('/conta/saldo/filho/:filhoId', async (req, res) => {
       await client.query('SET search_path TO banco_infantil');
       const result = await client.query('SELECT saldo FROM contas_filhos WHERE filho_id = $1', [filhoId]);
       if (result.rows.length === 0) {
-        return res.status(404).json({ error: 'Conta do filho não encontrada' });
+        return res.status(404).json({ error: 'Conta da criança não encontrada' });
       }
       res.status(200).json({ saldo: parseFloat(result.rows[0].saldo) });
     } finally {
       client.release();
     }
   } catch (error) {
-    console.error('Erro ao consultar saldo do filho:', error.stack);
-    res.status(500).json({ error: 'Erro ao consultar saldo' });
+    console.error('Erro ao consultar saldo da criança:', error.stack);
+    res.status(500).json({ error: 'Erro ao consultar saldo', details: error.message });
   }
 });
 
-// Endpoint para listar filhos
+// Endpoint para listar crianças
 app.get('/filhos/:paiId', async (req, res) => {
-  console.log('Requisição recebida em /filhos');
+  console.log('Requisição recebida em /filhos, paiId:', req.params.paiId);
   const { paiId } = req.params;
 
   try {
@@ -308,24 +311,48 @@ app.get('/filhos/:paiId', async (req, res) => {
     try {
       await client.query('SET search_path TO banco_infantil');
       const result = await client.query('SELECT id, nome_completo, email, icone FROM filhos WHERE pai_id = $1', [paiId]);
+      console.log('Crianças encontradas:', result.rows);
+      res.status(200).json({ 
+        filhos: result.rows,
+        message: result.rows.length === 0 ? 'Nenhuma criança encontrada para este responsável.' : 'Crianças carregadas com sucesso.'
+      });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Erro ao listar crianças:', error.stack);
+    res.status(500).json({ error: 'Erro ao listar crianças', details: error.message });
+  }
+});
+
+// Endpoint de debug para listar crianças com detalhes
+app.get('/debug/filhos/:paiId', async (req, res) => {
+  console.log('Requisição recebida em /debug/filhos:', req.params.paiId);
+  const { paiId } = req.params;
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query('SET search_path TO banco_infantil');
+      const result = await client.query('SELECT id, nome_completo, email, icone, pai_id FROM filhos WHERE pai_id = $1', [paiId]);
+      console.log('Crianças (debug):', result.rows);
       res.status(200).json({ filhos: result.rows });
     } finally {
       client.release();
     }
   } catch (error) {
-    console.error('Erro ao listar filhos:', error.stack);
-    res.status(500).json({ error: 'Erro ao listar filhos' });
+    console.error('Erro ao listar crianças (debug):', error.stack);
+    res.status(500).json({ error: 'Erro ao listar crianças', details: error.message });
   }
 });
 
-// Endpoint para cadastrar filho
+// Endpoint para cadastrar criança
 app.post('/filho', async (req, res) => {
   console.log('Requisição recebida em /filho:', req.body);
   const { nome_completo, senha, telefone, email, pai_id, icone } = req.body;
 
   try {
     if (!nome_completo || !senha || !telefone || !email || !pai_id) {
-      return res.status(400).json({ error: 'Dados do filho incompletos' });
+      return res.status(400).json({ error: 'Dados da criança incompletos' });
     }
 
     const client = await pool.connect();
@@ -337,31 +364,31 @@ app.post('/filho', async (req, res) => {
       );
       const filhoId = result.rows[0].id;
 
-      // Criar conta para o filho
+      // Criar conta para a criança
       await client.query('INSERT INTO contas_filhos (filho_id, saldo) VALUES ($1, $2)', [filhoId, 0.00]);
 
-      res.status(201).json({ filho: result.rows[0], message: 'Filho cadastrado com sucesso!' });
+      res.status(201).json({ filho: result.rows[0], message: 'Criança cadastrada com sucesso!' });
     } finally {
       client.release();
     }
   } catch (error) {
     if (error.code === '23505') {
-      console.log('Email do filho já existe:', error.detail);
-      return res.status(400).json({ error: 'Email do filho já cadastrado' });
+      console.log('Email da criança já existe:', error.detail);
+      return res.status(400).json({ error: 'Email da criança já cadastrado' });
     }
-    console.error('Erro ao cadastrar filho:', error.stack);
-    res.status(500).json({ error: 'Erro ao cadastrar filho' });
+    console.error('Erro ao cadastrar criança:', error.stack);
+    res.status(500).json({ error: 'Erro ao cadastrar criança', details: error.message });
   }
 });
 
-// Endpoint para adicionar saldo à conta do pai
+// Endpoint para adicionar saldo à conta do responsável
 app.post('/conta/adicionar-saldo', async (req, res) => {
   console.log('Requisição recebida em /conta/adicionar-saldo:', req.body);
   const { pai_id, valor } = req.body;
 
   try {
     if (!pai_id || !valor || valor <= 0) {
-      return res.status(400).json({ error: 'Dados inválidos: pai_id e valor são obrigatórios e valor deve ser maior que 0' });
+      return res.status(400).json({ error: 'Dados inválidos: ID do responsável e valor são obrigatórios e valor deve ser maior que 0' });
     }
 
     const client = await pool.connect();
@@ -369,21 +396,21 @@ app.post('/conta/adicionar-saldo', async (req, res) => {
       await client.query('BEGIN');
       await client.query('SET search_path TO banco_infantil');
 
-      // Buscar a conta do pai
+      // Buscar a conta do responsável
       const contaPaiResult = await client.query('SELECT id, saldo FROM contas WHERE pai_id = $1', [pai_id]);
       if (contaPaiResult.rows.length === 0) {
         await client.query('ROLLBACK');
-        return res.status(404).json({ error: 'Conta do pai não encontrada' });
+        return res.status(404).json({ error: 'Conta do responsável não encontrada' });
       }
       const contaId = contaPaiResult.rows[0].id;
 
-      // Adicionar saldo ao pai
+      // Adicionar saldo ao responsável
       await client.query('UPDATE contas SET saldo = saldo + $1 WHERE pai_id = $2', [valor, pai_id]);
 
       // Registrar transação
       const result = await client.query(
         'INSERT INTO transacoes (conta_id, tipo, valor, descricao) VALUES ($1, $2, $3, $4) RETURNING id',
-        [contaId, 'recebimento', valor, 'Adição de saldo pelo pai']
+        [contaId, 'recebimento', valor, 'Adição de saldo pelo responsável']
       );
 
       await client.query('COMMIT');
@@ -394,11 +421,11 @@ app.post('/conta/adicionar-saldo', async (req, res) => {
   } catch (error) {
     await client.query('ROLLBACK');
     console.error('Erro ao adicionar saldo:', error.stack);
-    res.status(500).json({ error: 'Erro ao adicionar saldo' });
+    res.status(500).json({ error: 'Erro ao adicionar saldo', details: error.message });
   }
 });
 
-// Endpoint para transação (pai)
+// Endpoint para transação (responsável)
 app.post('/transacao', async (req, res) => {
   console.log('Requisição recebida em /transacao:', req.body);
   const { conta_id, tipo, valor, descricao } = req.body;
@@ -426,11 +453,11 @@ app.post('/transacao', async (req, res) => {
   } catch (error) {
     await client.query('ROLLBACK');
     console.error('Erro na transação:', error.stack);
-    res.status(500).json({ error: 'Erro ao realizar transação' });
+    res.status(500).json({ error: 'Erro ao realizar transação', details: error.message });
   }
 });
 
-// Endpoint para transferência pai -> filho
+// Endpoint para transferência responsável -> criança
 app.post('/transferencia', async (req, res) => {
   console.log('Requisição recebida em /transferencia:', req.body);
   const { pai_id, filho_id, valor, descricao } = req.body;
@@ -445,11 +472,11 @@ app.post('/transferencia', async (req, res) => {
       await client.query('BEGIN');
       await client.query('SET search_path TO banco_infantil');
 
-      // Buscar a conta do pai
+      // Buscar a conta do responsável
       const contaPaiResult = await client.query('SELECT id, saldo FROM contas WHERE pai_id = $1', [pai_id]);
       if (contaPaiResult.rows.length === 0) {
         await client.query('ROLLBACK');
-        return res.status(404).json({ error: 'Conta do pai não encontrada' });
+        return res.status(404).json({ error: 'Conta do responsável não encontrada' });
       }
       const contaId = contaPaiResult.rows[0].id;
       const saldoPai = parseFloat(contaPaiResult.rows[0].saldo);
@@ -460,14 +487,14 @@ app.post('/transferencia', async (req, res) => {
         return res.status(400).json({ error: 'Saldo insuficiente para a transferência' });
       }
 
-      // Deduzir do pai
+      // Deduzir do responsável
       await client.query('UPDATE contas SET saldo = saldo - $1 WHERE pai_id = $2', [valor, pai_id]);
-      // Adicionar ao filho
+      // Adicionar à criança
       await client.query('UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2', [valor, filho_id]);
       // Registrar transação
       const result = await client.query(
         'INSERT INTO transacoes (conta_id, tipo, valor, descricao) VALUES ($1, $2, $3, $4) RETURNING id',
-        [contaId, 'transferencia', valor, descricao || `Transferência para filho ${filho_id}`]
+        [contaId, 'transferencia', valor, descricao || `Transferência para criança ${filho_id}`]
       );
       await client.query('COMMIT');
       res.status(201).json({ transacao: result.rows[0], message: 'Transferência realizada com sucesso!' });
@@ -477,11 +504,11 @@ app.post('/transferencia', async (req, res) => {
   } catch (error) {
     await client.query('ROLLBACK');
     console.error('Erro na transferência:', error.stack);
-    res.status(500).json({ error: 'Erro ao realizar transferência' });
+    res.status(500).json({ error: 'Erro ao realizar transferência', details: error.message });
   }
 });
 
-// Endpoint para penalizar filho (remover dinheiro)
+// Endpoint para penalizar criança (remover dinheiro)
 app.post('/penalizar', async (req, res) => {
   console.log('Requisição recebida em /penalizar:', req.body);
   const { pai_id, filho_id, valor, motivo } = req.body;
@@ -496,41 +523,41 @@ app.post('/penalizar', async (req, res) => {
       await client.query('BEGIN');
       await client.query('SET search_path TO banco_infantil');
 
-      // Verificar saldo do filho
+      // Verificar saldo da criança
       const contaFilhoResult = await client.query('SELECT saldo FROM contas_filhos WHERE filho_id = $1', [filho_id]);
       if (contaFilhoResult.rows.length === 0) {
         await client.query('ROLLBACK');
-        return res.status(404).json({ error: 'Conta do filho não encontrada' });
+        return res.status(404).json({ error: 'Conta da criança não encontrada' });
       }
       const saldoFilho = parseFloat(contaFilhoResult.rows[0].saldo);
 
       if (saldoFilho < valor) {
         await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'Saldo insuficiente no filho para a penalidade' });
+        return res.status(400).json({ error: 'Saldo insuficiente na criança para a penalidade' });
       }
 
-      // Buscar a conta do pai
+      // Buscar a conta do responsável
       const contaPaiResult = await client.query('SELECT id FROM contas WHERE pai_id = $1', [pai_id]);
       if (contaPaiResult.rows.length === 0) {
         await client.query('ROLLBACK');
-        return res.status(404).json({ error: 'Conta do pai não encontrada' });
+        return res.status(404).json({ error: 'Conta do responsável não encontrada' });
       }
       const contaId = contaPaiResult.rows[0].id;
 
-      // Deduzir do filho
+      // Deduzir da criança
       await client.query('UPDATE contas_filhos SET saldo = saldo - $1 WHERE filho_id = $2', [valor, filho_id]);
-      // Adicionar ao pai
+      // Adicionar ao responsável
       await client.query('UPDATE contas SET saldo = saldo + $1 WHERE pai_id = $2', [valor, pai_id]);
       // Registrar transação
       const result = await client.query(
         'INSERT INTO transacoes (conta_id, tipo, valor, descricao) VALUES ($1, $2, $3, $4) RETURNING id',
-        [contaId, 'penalidade', valor, `Penalidade para filho ${filho_id}: ${motivo}`]
+        [contaId, 'penalidade', valor, `Penalidade para criança ${filho_id}: ${motivo}`]
       );
 
-      // Adicionar notificação para o filho
+      // Adicionar notificação para a criança
       await client.query(
         'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
-        [filho_id, `Você foi penalizado pelo seu pai e perdeu R$ ${valor.toFixed(2)}. Motivo: ${motivo}`, new Date()]
+        [filho_id, `Você foi penalizado pelo seu responsável e perdeu R$ ${valor.toFixed(2)}. Motivo: ${motivo}`, new Date()]
       );
 
       await client.query('COMMIT');
@@ -541,13 +568,13 @@ app.post('/penalizar', async (req, res) => {
   } catch (error) {
     await client.query('ROLLBACK');
     console.error('Erro na penalidade:', error.stack);
-    res.status(500).json({ error: 'Erro ao aplicar penalidade' });
+    res.status(500).json({ error: 'Erro ao aplicar penalidade', details: error.message });
   }
 });
 
-// Endpoint para listar notificações do filho
+// Endpoint para listar notificações da criança
 app.get('/notificacoes/:filhoId', async (req, res) => {
-  console.log('Requisição recebida em /notificacoes/:filhoId');
+  console.log('Requisição recebida em /notificacoes/:filhoId:', req.params.filhoId);
   const { filhoId } = req.params;
 
   try {
@@ -564,7 +591,7 @@ app.get('/notificacoes/:filhoId', async (req, res) => {
     }
   } catch (error) {
     console.error('Erro ao listar notificações:', error.stack);
-    res.status(500).json({ error: 'Erro ao listar notificações' });
+    res.status(500).json({ error: 'Erro ao listar notificações', details: error.message });
   }
 });
 
@@ -575,7 +602,7 @@ app.post('/transferencia/externa', async (req, res) => {
 
   try {
     if (!pai_id || !chave_pix || !valor) {
-      return res.status(400).json({ error: 'Dados da transferência incompleta: pai_id, chave_pix e valor são obrigatórios' });
+      return res.status(400).json({ error: 'Dados da transferência incompleta: ID do responsável, chave PIX e valor são obrigatórios' });
     }
 
     const client = await pool.connect();
@@ -583,11 +610,11 @@ app.post('/transferencia/externa', async (req, res) => {
       await client.query('BEGIN');
       await client.query('SET search_path TO banco_infantil');
 
-      // Buscar a conta do pai
+      // Buscar a conta do responsável
       const contaPaiResult = await client.query('SELECT id, saldo FROM contas WHERE pai_id = $1', [pai_id]);
       if (contaPaiResult.rows.length === 0) {
         await client.query('ROLLBACK');
-        return res.status(404).json({ error: 'Conta do pai não encontrada' });
+        return res.status(404).json({ error: 'Conta do responsável não encontrada' });
       }
       const contaId = contaPaiResult.rows[0].id;
       const saldoPai = parseFloat(contaPaiResult.rows[0].saldo);
@@ -598,7 +625,7 @@ app.post('/transferencia/externa', async (req, res) => {
         return res.status(400).json({ error: 'Saldo insuficiente para a transferência' });
       }
 
-      // Deduzir do pai
+      // Deduzir do responsável
       await client.query('UPDATE contas SET saldo = saldo - $1 WHERE pai_id = $2', [valor, pai_id]);
       // Registrar transação
       const result = await client.query(
@@ -613,7 +640,7 @@ app.post('/transferencia/externa', async (req, res) => {
   } catch (error) {
     await client.query('ROLLBACK');
     console.error('Erro na transferência externa:', error.stack);
-    res.status(500).json({ error: 'Erro ao realizar transferência externa' });
+    res.status(500).json({ error: 'Erro ao realizar transferência externa', details: error.message });
   }
 });
 
@@ -640,13 +667,13 @@ app.post('/tarefa', async (req, res) => {
     }
   } catch (error) {
     console.error('Erro ao cadastrar tarefa:', error.stack);
-    res.status(500).json({ error: 'Erro ao cadastrar tarefa' });
+    res.status(500).json({ error: 'Erro ao cadastrar tarefa', details: error.message });
   }
 });
 
 // Endpoint para listar tarefas
 app.get('/tarefas/:filhoId', async (req, res) => {
-  console.log('Requisição recebida em /tarefas');
+  console.log('Requisição recebida em /tarefas:', req.params.filhoId);
   const { filhoId } = req.params;
 
   try {
@@ -665,13 +692,13 @@ app.get('/tarefas/:filhoId', async (req, res) => {
     }
   } catch (error) {
     console.error('Erro ao listar tarefas:', error.stack);
-    res.status(500).json({ error: 'Erro ao listar tarefas' });
+    res.status(500).json({ error: 'Erro ao listar tarefas', details: error.message });
   }
 });
 
-// Endpoint para listar tarefas de todos os filhos
+// Endpoint para listar tarefas de todas as crianças
 app.get('/tarefas/filhos/:paiId', async (req, res) => {
-  console.log('Requisição recebida em /tarefas/filhos');
+  console.log('Requisição recebida em /tarefas/filhos:', req.params.paiId);
   const { paiId } = req.params;
 
   try {
@@ -696,14 +723,14 @@ app.get('/tarefas/filhos/:paiId', async (req, res) => {
       client.release();
     }
   } catch (error) {
-    console.error('Erro ao listar tarefas dos filhos:', error.stack);
-    res.status(500).json({ error: 'Erro ao listar tarefas dos filhos' });
+    console.error('Erro ao listar tarefas das crianças:', error.stack);
+    res.status(500).json({ error: 'Erro ao listar tarefas das crianças', details: error.message });
   }
 });
 
-// Endpoint para o filho marcar tarefa como concluída
+// Endpoint para a criança marcar tarefa como concluída
 app.post('/tarefa/marcar-concluida/:tarefaId', async (req, res) => {
-  console.log('Requisição recebida em /tarefa/marcar-concluida');
+  console.log('Requisição recebida em /tarefa/marcar-concluida:', req.params.tarefaId);
   const { tarefaId } = req.params;
 
   try {
@@ -725,13 +752,13 @@ app.post('/tarefa/marcar-concluida/:tarefaId', async (req, res) => {
     }
   } catch (error) {
     console.error('Erro ao marcar tarefa:', error.stack);
-    res.status(500).json({ error: 'Erro ao marcar tarefa' });
+    res.status(500).json({ error: 'Erro ao marcar tarefa', details: error.message });
   }
 });
 
 // Endpoint para aprovar tarefa
 app.post('/tarefa/aprovar/:tarefaId', async (req, res) => {
-  console.log('Requisição recebida em /tarefa/aprovar');
+  console.log('Requisição recebida em /tarefa/aprovar:', req.params.tarefaId);
   const { tarefaId } = req.params;
   const { pai_id, filho_id } = req.body;
 
@@ -749,16 +776,16 @@ app.post('/tarefa/aprovar/:tarefaId', async (req, res) => {
       }
       if (tarefaResult.rows[0].status !== 'concluida_pelo_filho') {
         await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'Tarefa não foi marcada como concluída pelo filho' });
+        return res.status(400).json({ error: 'Tarefa não foi marcada como concluída pela criança' });
       }
 
       const valor = parseFloat(tarefaResult.rows[0].valor);
 
-      // Buscar a conta do pai
+      // Buscar a conta do responsável
       const contaPaiResult = await client.query('SELECT id, saldo FROM contas WHERE pai_id = $1', [pai_id]);
       if (contaPaiResult.rows.length === 0) {
         await client.query('ROLLBACK');
-        return res.status(404).json({ error: 'Conta do pai não encontrada' });
+        return res.status(404).json({ error: 'Conta do responsável não encontrada' });
       }
       const contaId = contaPaiResult.rows[0].id;
       const saldoPai = parseFloat(contaPaiResult.rows[0].saldo);
@@ -769,9 +796,9 @@ app.post('/tarefa/aprovar/:tarefaId', async (req, res) => {
         return res.status(400).json({ error: 'Saldo insuficiente para aprovar a tarefa' });
       }
 
-      // Deduzir do pai
+      // Deduzir do responsável
       await client.query('UPDATE contas SET saldo = saldo - $1 WHERE id = $2', [valor, contaId]);
-      // Adicionar ao filho
+      // Adicionar à criança
       await client.query('UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2', [valor, filho_id]);
       // Atualizar tarefa
       await client.query('UPDATE tarefas SET status = $1 WHERE id = $2', ['aprovada', tarefaId]);
@@ -788,13 +815,13 @@ app.post('/tarefa/aprovar/:tarefaId', async (req, res) => {
   } catch (error) {
     await client.query('ROLLBACK');
     console.error('Erro ao aprovar tarefa:', error.stack);
-    res.status(500).json({ error: 'Erro ao aprovar tarefa' });
+    res.status(500).json({ error: 'Erro ao aprovar tarefa', details: error.message });
   }
 });
 
-// Endpoint para buscar dados de um filho por ID
+// Endpoint para buscar dados de uma criança por ID
 app.get('/filho/:filhoId', async (req, res) => {
-  console.log('Requisição recebida em /filho/:filhoId');
+  console.log('Requisição recebida em /filho/:filhoId:', req.params.filhoId);
   const { filhoId } = req.params;
 
   try {
@@ -806,86 +833,92 @@ app.get('/filho/:filhoId', async (req, res) => {
         [filhoId]
       );
       if (result.rows.length === 0) {
-        return res.status(404).json({ error: 'Filho não encontrado' });
+        return res.status(404).json({ error: 'Criança não encontrada' });
       }
       res.status(200).json({ filho: result.rows[0] });
     } finally {
       client.release();
     }
   } catch (error) {
-    console.error('Erro ao buscar filho:', error.stack);
-    res.status(500).json({ error: 'Erro ao buscar filho' });
+    console.error('Erro ao buscar criança:', error.stack);
+    res.status(500).json({ error: 'Erro ao buscar criança', details: error.message });
   }
 });
 
-// Endpoint para histórico de transações de tarefas do filho
-app.get('/transacoes/tarefas/:filhoId', async (req, res) => {
-  console.log('Requisição recebida em /transacoes/tarefas');
-  const { filhoId } = req.params;
-
-  try {
-    const client = await pool.connect();
-    try {
-      await client.query('SET search_path TO banco_infantil');
-      const result = await client.query(`
-        SELECT t.id, t.descricao, t.valor, t.data_criacao
-        FROM tarefas t
-        WHERE t.filho_id = $1 AND t.status = 'aprovada'
-        AND t.data_criacao >= CURRENT_DATE - INTERVAL '7 days'
-        ORDER BY t.data_criacao DESC
-      `, [filhoId]);
-
-      const total = result.rows.reduce((sum, tarefa) => sum + parseFloat(tarefa.valor), 0);
-
-      res.status(200).json({
-        transacoes: result.rows.map(tarefa => ({
-          id: tarefa.id,
-          descricao: tarefa.descricao,
-          valor: parseFloat(tarefa.valor),
-          data: tarefa.data_criacao
-        })),
-        total
-      });
-    } finally {
-      client.release();
-    }
-  } catch (error) {
-    console.error('Erro ao buscar transações de tarefas:', error.stack);
-    res.status(500).json({ error: 'Erro ao buscar transações' });
-  }
-});
-
-// Endpoint para total de transações de tarefas do pai
+// Endpoint para histórico de transações de tarefas do responsável
 app.get('/transacoes/tarefas/pai/:paiId', async (req, res) => {
-  console.log('Requisição recebida em /transacoes/tarefas/pai');
+  console.log('Requisição recebida em /transacoes/tarefas/pai:', req.params.paiId);
   const { paiId } = req.params;
-
   try {
     const client = await pool.connect();
     try {
       await client.query('SET search_path TO banco_infantil');
+      // Check if tarefas table exists
+      const tableCheck = await client.query(`
+        SELECT EXISTS (
+          SELECT FROM information_schema.tables 
+          WHERE table_schema = 'banco_infantil' AND table_name = 'tarefas'
+        )
+      `);
+      if (!tableCheck.rows[0].exists) {
+        return res.status(200).json({ total: 0 }); // Return 0 if table doesn't exist
+      }
       const result = await client.query(`
-        SELECT SUM(t.valor) as total
+        SELECT COALESCE(SUM(t.valor), 0) as total
         FROM tarefas t
         JOIN filhos f ON t.filho_id = f.id
         WHERE f.pai_id = $1 AND t.status = 'aprovada'
       `, [paiId]);
-
-      const total = parseFloat(result.rows[0].total) || 0;
-
+      const total = parseFloat(result.rows[0].total);
       res.status(200).json({ total });
     } finally {
       client.release();
     }
   } catch (error) {
-    console.error('Erro ao buscar total de transações do pai:', error.stack);
-    res.status(500).json({ error: 'Erro ao buscar total' });
+    console.error('Erro ao buscar total de transações do responsável:', error.stack);
+    res.status(500).json({ error: 'Erro ao buscar total', details: error.message });
   }
 });
 
-// Endpoint para monitoramento de um filho
+// Endpoint para histórico de transações de tarefas da criança
+app.get('/transacoes/tarefas/:filhoId', async (req, res) => {
+  console.log('Requisição recebida em /transacoes/tarefas:', req.params.filhoId);
+  const { filhoId } = req.params;
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query('SET search_path TO banco_infantil');
+      const result = await client.query(`
+        SELECT t.id, t.descricao, t.valor, t.data_criacao as data
+        FROM tarefas t
+        WHERE t.filho_id = $1 AND t.status = 'aprovada'
+        AND t.data_criacao >= CURRENT_DATE - INTERVAL '7 days'
+      `, [filhoId]);
+      const transacoes = result.rows.map(t => {
+        const valor = parseFloat(t.valor);
+        console.log('Transação:', { id: t.id, descricao: t.descricao, valor, data: t.data });
+        return {
+          id: t.id,
+          descricao: t.descricao,
+          valor: isNaN(valor) ? 0 : valor,
+          data: t.data
+        };
+      });
+      const total = transacoes.reduce((sum, t) => sum + t.valor, 0);
+      console.log('Resposta enviada:', { transacoes, total });
+      res.status(200).json({ transacoes, total });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Erro ao buscar transações da criança:', error.stack);
+    res.status(200).json({ transacoes: [], total: 0 });
+  }
+});
+
+// Endpoint para monitoramento de uma criança
 app.get('/monitoramento/:filhoId', async (req, res) => {
-  console.log('Requisição recebida em /monitoramento');
+  console.log('Requisição recebida em /monitoramento:', req.params.filhoId);
   const { filhoId } = req.params;
 
   try {
@@ -942,289 +975,7 @@ app.get('/monitoramento/:filhoId', async (req, res) => {
     }
   } catch (error) {
     console.error('Erro ao buscar dados de monitoramento:', error.stack);
-    res.status(500).json({ error: 'Erro ao buscar dados de monitoramento' });
-  }
-});
-
-// *** ENDPOINTS PARA DESAFIOS MATEMÁTICOS ***
-
-// Função auxiliar para gerar um número aleatório entre min e max
-function getRandomInt(min, max) {
-  return Math.floor(Math.random() * (max - min + 1)) + min;
-}
-
-// Função para gerar um desafio matemático
-function generateMathChallenge() {
-  const operations = ['soma', 'subtracao', 'multiplicacao', 'divisao'];
-  const operation = operations[getRandomInt(0, 3)];
-  let num1, num2, pergunta, respostaCorreta;
-
-  switch (operation) {
-    case 'soma':
-      num1 = getRandomInt(1, 10);
-      num2 = getRandomInt(1, 10);
-      pergunta = `${num1} + ${num2}`;
-      respostaCorreta = num1 + num2;
-      break;
-    case 'subtracao':
-      num1 = getRandomInt(1, 10);
-      num2 = getRandomInt(1, num1);
-      pergunta = `${num1} - ${num2}`;
-      respostaCorreta = num1 - num2;
-      break;
-    case 'multiplicacao':
-      num1 = getRandomInt(1, 10);
-      num2 = getRandomInt(1, 10);
-      pergunta = `${num1} × ${num2}`;
-      respostaCorreta = num1 * num2;
-      break;
-    case 'divisao':
-      num2 = getRandomInt(1, 10);
-      respostaCorreta = getRandomInt(1, 10);
-      num1 = num2 * respostaCorreta;
-      pergunta = `${num1} ÷ ${num2}`;
-      break;
-    default:
-      throw new Error('Operação inválida');
-  }
-
-  return { tipo: operation, pergunta, respostaCorreta };
-}
-
-// Modelos padrão de desafios
-const MODELOS_DESAFIOS = {
-  '1': { name: 'Equilibrado', soma: 4, subtracao: 4, multiplicacao: 4, divisao: 3 },
-  '2': { name: 'Foco em Soma e Subtração', soma: 7, subtracao: 7, multiplicacao: 1, divisao: 0 },
-  '3': { name: 'Foco em Multiplicação', soma: 3, subtracao: 2, multiplicacao: 10, divisao: 0 },
-  '4': { name: 'Foco em Divisão', soma: 4, subtracao: 3, multiplicacao: 0, divisao: 8 },
-  '5': { name: 'Mistura Leve', soma: 5, subtracao: 5, multiplicacao: 3, divisao: 2 }
-};
-
-// Endpoint para listar os modelos disponíveis
-app.get('/desafios/modelos', async (req, res) => {
-  console.log('Requisição recebida em /desafios/modelos');
-  try {
-    const modelos = Object.keys(MODELOS_DESAFIOS).map(id => ({
-      id,
-      name: MODELOS_DESAFIOS[id].name,
-      descricao: `Soma: ${MODELOS_DESAFIOS[id].soma}, Subtração: ${MODELOS_DESAFIOS[id].subtracao}, Multiplicação: ${MODELOS_DESAFIOS[id].multiplicacao}, Divisão: ${MODELOS_DESAFIOS[id].divisao}`
-    }));
-    res.status(200).json({ modelos });
-  } catch (error) {
-    console.error('Erro ao listar modelos:', error.stack);
-    res.status(500).json({ error: 'Erro ao listar modelos' });
-  }
-});
-
-// Endpoint para gerar desafios automáticos
-app.post('/desafios/gerar/:filhoId', async (req, res) => {
-  console.log('Requisição recebida em /desafios/gerar/:filhoId');
-  const { filhoId } = req.params;
-  const { modeloId, valorTotal, paiId } = req.body;
-
-  try {
-    if (!modeloId || !valorTotal || !paiId) {
-      return res.status(400).json({ error: 'Modelo, valor total e ID do pai são obrigatórios' });
-    }
-
-    if (!MODELOS_DESAFIOS[modeloId]) {
-      return res.status(400).json({ error: 'Modelo inválido' });
-    }
-
-    const client = await pool.connect();
-    try {
-      await client.query('SET search_path TO banco_infantil');
-      // Verificar saldo do pai
-      const contaPaiResult = await client.query('SELECT id, saldo FROM contas WHERE pai_id = $1', [paiId]);
-      if (contaPaiResult.rows.length === 0) {
-        return res.status(404).json({ error: 'Conta do pai não encontrada' });
-      }
-      const saldoPai = parseFloat(contaPaiResult.rows[0].saldo);
-      if (saldoPai < valorTotal) {
-        return res.status(400).json({ error: 'Saldo insuficiente para criar os desafios' });
-      }
-
-      // Verificar desafios pendentes para o dia atual
-      const today = new Date().toISOString().split('T')[0];
-      const desafiosExistentes = await client.query(
-        `SELECT COUNT(*) FROM desafios_matematicos WHERE filho_id = $1 AND DATE(data_criacao) = $2 AND status = 'pendente'`,
-        [filhoId, today]
-      );
-      if (parseInt(desafiosExistentes.rows[0].count) > 0) {
-        return res.status(400).json({ error: 'Já existem desafios pendentes para hoje' });
-      }
-
-      const modelo = MODELOS_DESAFIOS[modeloId];
-      const desafios = [];
-
-      // Gerar desafios de soma
-      for (let i = 0; i < modelo.soma; i++) {
-        const num1 = getRandomInt(1, 10);
-        const num2 = getRandomInt(1, 10);
-        desafios.push({
-          tipo: 'soma',
-          pergunta: `${num1} + ${num2}`,
-          respostaCorreta: num1 + num2
-        });
-      }
-
-      // Gerar desafios de subtração
-      for (let i = 0; i < modelo.subtracao; i++) {
-        const num1 = getRandomInt(1, 10);
-        const num2 = getRandomInt(1, num1);
-        desafios.push({
-          tipo: 'subtracao',
-          pergunta: `${num1} - ${num2}`,
-          respostaCorreta: num1 - num2
-        });
-      }
-
-      // Gerar desafios de multiplicação
-      for (let i = 0; i < modelo.multiplicacao; i++) {
-        const num1 = getRandomInt(1, 10);
-        const num2 = getRandomInt(1, 10);
-        desafios.push({
-          tipo: 'multiplicacao',
-          pergunta: `${num1} × ${num2}`,
-          respostaCorreta: num1 * num2
-        });
-      }
-
-      // Gerar desafios de divisão
-      for (let i = 0; i < modelo.divisao; i++) {
-        const num2 = getRandomInt(1, 10);
-        const respostaCorreta = getRandomInt(1, 10);
-        const num1 = num2 * respostaCorreta;
-        desafios.push({
-          tipo: 'divisao',
-          pergunta: `${num1} ÷ ${num2}`,
-          respostaCorreta
-        });
-      }
-
-      // Inserir os desafios no banco
-      for (const desafio of desafios) {
-        await client.query(
-          'INSERT INTO desafios_matematicos (filho_id, tipo, pergunta, resposta_correta, valor, status) VALUES ($1, $2, $3, $4, $5, $6)',
-          [filhoId, desafio.tipo, desafio.pergunta, desafio.respostaCorreta, valorTotal, 'pendente']
-        );
-      }
-
-      res.status(201).json({ message: 'Desafios gerados com sucesso!' });
-    } finally {
-      client.release();
-    }
-  } catch (error) {
-    console.error('Erro ao gerar desafios:', error.stack);
-    res.status(500).json({ error: 'Erro ao gerar desafios' });
-  }
-});
-
-// Endpoint para listar desafios pendentes do filho
-app.get('/desafios/:filhoId', async (req, res) => {
-  console.log('Requisição recebida em /desafios/:filhoId');
-  const { filhoId } = req.params;
-
-  try {
-    const client = await pool.connect();
-    try {
-      await client.query('SET search_path TO banco_infantil');
-      const today = new Date().toISOString().split('T')[0];
-      const result = await client.query(
-        `SELECT id, tipo, pergunta, valor FROM desafios_matematicos WHERE filho_id = $1 AND status = 'pendente' AND DATE(data_criacao) = $2 ORDER BY id`,
-        [filhoId, today]
-      );
-      res.status(200).json({
-        desafios: result.rows.map(desafio => ({
-          id: desafio.id,
-          tipo: desafio.tipo,
-          pergunta: desafio.pergunta,
-          valor: parseFloat(desafio.valor)
-        }))
-      });
-    } finally {
-      client.release();
-    }
-  } catch (error) {
-    console.error('Erro ao listar desafios:', error.stack);
-    res.status(500).json({ error: 'Erro ao listar desafios' });
-  }
-});
-
-// Endpoint para a criança responder um desafio
-app.post('/desafio/responder/:desafioId', async (req, res) => {
-  console.log('Requisição recebida em /desafio/responder/:desafioId');
-  const { desafioId } = req.params;
-  const { resposta, filhoId, paiId } = req.body;
-
-  try {
-    const client = await pool.connect();
-    try {
-      await client.query('SET search_path TO banco_infantil');
-      const desafioResult = await client.query(
-        'SELECT resposta_correta, valor, status FROM desafios_matematicos WHERE id = $1 AND filho_id = $2',
-        [desafioId, filhoId]
-      );
-      if (desafioResult.rows.length === 0) {
-        return res.status(404).json({ error: 'Desafio não encontrado' });
-      }
-      const desafio = desafioResult.rows[0];
-      if (desafio.status !== 'pendente') {
-        return res.status(400).json({ error: 'Desafio já foi respondido' });
-      }
-
-      const respostaCorreta = parseFloat(desafio.resposta_correta);
-      const valorTotal = parseFloat(desafio.valor);
-      const acertou = Math.abs(resposta - respostaCorreta) < 0.01;
-
-      // Marcar a resposta
-      await client.query('UPDATE desafios_matematicos SET status = $1 WHERE id = $2', [acertou ? 'acertado' : 'errado', desafioId]);
-
-      // Verificar se todos os desafios foram respondidos
-      const today = new Date().toISOString().split('T')[0];
-      const desafiosDia = await client.query(
-        `SELECT status FROM desafios_matematicos WHERE filho_id = $1 AND DATE(data_criacao) = $2`,
-        [filhoId, today]
-      );
-
-      const todosRespondidos = desafiosDia.rows.length === 15 && desafiosDia.rows.every(d => d.status !== 'pendente');
-      if (todosRespondidos) {
-        const todosAcertados = desafiosDia.rows.every(d => d.status === 'acertado');
-        if (todosAcertados) {
-          // Creditar o valor total
-          const contaPaiResult = await client.query('SELECT id, saldo FROM contas WHERE pai_id = $1', [paiId]);
-          if (contaPaiResult.rows.length === 0) {
-            return res.status(404).json({ error: 'Conta do pai não encontrada' });
-          }
-          const contaId = contaPaiResult.rows[0].id;
-          const saldoPai = parseFloat(contaPaiResult.rows[0].saldo);
-
-          if (saldoPai < valorTotal) {
-            return res.status(400).json({ error: 'Saldo insuficiente para recompensar o desafio' });
-          }
-
-          await client.query('BEGIN');
-          await client.query('UPDATE contas SET saldo = saldo - $1 WHERE pai_id = $2', [valorTotal, paiId]);
-          await client.query('UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2', [valorTotal, filhoId]);
-          await client.query(
-            'INSERT INTO transacoes (conta_id, tipo, valor, descricao) VALUES ($1, $2, $3, $4)',
-            [contaId, 'transferencia', valorTotal, `Recompensa por completar todos os desafios matemáticos do dia`]
-          );
-          await client.query('COMMIT');
-          res.status(200).json({ message: 'Resposta registrada! Você acertou todos os desafios e ganhou R$ ' + valorTotal.toFixed(2), acertou, todosAcertados: true });
-        } else {
-          res.status(200).json({ message: acertou ? 'Resposta correta! Continue respondendo.' : 'Resposta incorreta! Você não acertou todos os desafios.', acertou, todosAcertados: false });
-        }
-      } else {
-        res.status(200).json({ message: acertou ? 'Resposta correta! Continue respondendo.' : 'Resposta incorreta! Continue respondendo as próximas perguntas.', acertou, todosAcertados: false });
-      }
-    } finally {
-      client.release();
-    }
-  } catch (error) {
-    await client.query('ROLLBACK');
-    console.error('Erro ao responder desafio:', error.stack);
-    res.status(500).json({ error: 'Erro ao responder desafio' });
+    res.status(500).json({ error: 'Erro ao buscar dados de monitoramento', details: error.message });
   }
 });
 
