@@ -1,4 +1,3 @@
-
 require('dotenv').config();
 const express = require('express');
 const { Pool } = require('pg');
@@ -28,7 +27,19 @@ const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir),
   filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`)
 });
-const upload = multer({ storage });
+const upload = multer({ 
+  storage,
+  limits: { fileSize: 2 * 1024 * 1024 }, // 2MB
+  fileFilter: (req, file, cb) => {
+    const filetypes = /jpeg|jpg|png/;
+    const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = filetypes.test(file.mimetype);
+    if (extname && mimetype) {
+      return cb(null, true);
+    }
+    cb(new Error('Apenas imagens JPEG ou PNG são permitidas!'));
+  }
+});
 
 // Configuração do PostgreSQL com as credenciais do .env
 const pool = new Pool({
@@ -37,13 +48,19 @@ const pool = new Pool({
   database: process.env.DB_DATABASE,
   password: process.env.DB_PASSWORD,
   port: parseInt(process.env.DB_PORT),
-  max: 5,
-  idleTimeoutMillis: 10000,
-  connectionTimeoutMillis: 15000,
+  max: 10,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 20000,
   ssl: {
     require: true,
     rejectUnauthorized: false
   }
+});
+
+// Tratamento de erros do pool
+pool.on('error', (err, client) => {
+  console.error('Erro inesperado no pool de conexões:', err);
+  process.exit(-1);
 });
 
 // Testar conexão com o banco
@@ -78,6 +95,81 @@ app.use('/desafios', desafiosRouter);
 app.get('/health', (req, res) => {
   console.log('Requisição recebida em /health');
   res.status(200).json({ status: 'Servidor ativo' });
+});
+
+// Middleware para tratar erros do Multer
+const handleMulterError = (err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    return res.status(400).json({ error: 'Erro no upload: ' + err.message });
+  }
+  if (err) {
+    return res.status(400).json({ error: err.message });
+  }
+  next();
+};
+
+// Endpoint para upload de avatar da criança
+app.post('/perfil/avatar', upload.single('avatar'), handleMulterError, async (req, res) => {
+  console.log('Requisição recebida em /perfil/avatar:', { filhoId: req.body.filhoId, file: req.file });
+  const { filhoId } = req.body;
+  const avatar = req.file ? req.file.filename : null;
+
+  try {
+    if (!filhoId || !avatar) {
+      console.log('ID da criança ou arquivo de avatar ausente');
+      return res.status(400).json({ error: 'ID da criança ou arquivo de avatar ausente' });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('SET search_path TO banco_infantil');
+      const result = await client.query(
+        'UPDATE filhos SET icone = $1 WHERE id = $2 RETURNING icone',
+        [avatar, filhoId]
+      );
+      if (result.rows.length === 0) {
+        return res.status(404).json({ error: 'Criança não encontrada' });
+      }
+      res.status(200).json({ message: 'Avatar atualizado com sucesso', avatar: result.rows[0].icone });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Erro ao atualizar avatar:', error.stack);
+    res.status(500).json({ error: 'Erro ao atualizar avatar', details: error.message });
+  }
+});
+
+// Endpoint para upload de fundo da criança
+app.post('/perfil/background', upload.single('background'), handleMulterError, async (req, res) => {
+  console.log('Requisição recebida em /perfil/background:', { filhoId: req.body.filhoId, file: req.file });
+  const { filhoId } = req.body;
+  const background = req.file ? req.file.filename : null;
+
+  try {
+    if (!filhoId || !background) {
+      console.log('ID da criança ou arquivo de fundo ausente');
+      return res.status(400).json({ error: 'ID da criança ou arquivo de fundo ausente' });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('SET search_path TO banco_infantil');
+      const result = await client.query(
+        'UPDATE filhos SET background = $1 WHERE id = $2 RETURNING background',
+        [background, filhoId]
+      );
+      if (result.rows.length === 0) {
+        return res.status(404).json({ error: 'Criança não encontrada' });
+      }
+      res.status(200).json({ message: 'Fundo atualizado com sucesso', background: result.rows[0].background });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Erro ao atualizar fundo:', error.stack);
+    res.status(500).json({ error: 'Erro ao atualizar fundo', details: error.message });
+  }
 });
 
 // Endpoint de cadastro (pai e criança)
@@ -132,7 +224,7 @@ app.post('/cadastro', async (req, res) => {
       return res.status(400).json({ error: 'Usuário já existe: CPF ou email já cadastrado' });
     }
     console.error('Erro no cadastro:', error.stack);
-    res.status(500).json({ error: 'Erro ao cadastrar' });
+    res.status(500).json({ error: 'Erro ao cadastrar', details: error.message });
   }
 });
 
@@ -169,7 +261,7 @@ app.post('/login', async (req, res) => {
       attempt++;
       if (attempt === maxRetries) {
         console.error('Erro no login após tentativas:', error.stack);
-        return res.status(500).json({ error: 'Erro ao fazer login' });
+        return res.status(500).json({ error: 'Erro ao fazer login', details: error.message });
       }
       console.log(`Tentativa ${attempt} falhou, tentando novamente...`);
       await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
@@ -179,26 +271,30 @@ app.post('/login', async (req, res) => {
 
 // Endpoint para atualizar foto de perfil
 app.post('/perfil/foto', upload.single('foto'), async (req, res) => {
-  console.log('Requisição recebida em /perfil/foto');
+  console.log('Requisição recebida em /perfil/foto:', { paiId: req.body.paiId, file: req.file });
   const { paiId } = req.body;
   const foto = req.file ? req.file.filename : null;
 
   try {
     if (!paiId || !foto) {
+      console.log('ID do responsável ou foto ausente');
       return res.status(400).json({ error: 'ID do responsável ou foto ausente' });
     }
 
     const client = await pool.connect();
     try {
       await client.query('SET search_path TO banco_infantil');
-      await client.query('UPDATE pais SET foto_perfil = $1 WHERE id = $2', [foto, paiId]);
-      res.status(200).json({ message: 'Foto de perfil atualizada com sucesso', foto });
+      const result = await client.query('UPDATE pais SET foto_perfil = $1 WHERE id = $2 RETURNING foto_perfil', [foto, paiId]);
+      if (result.rows.length === 0) {
+        return res.status(404).json({ error: 'Responsável não encontrado' });
+      }
+      res.status(200).json({ message: 'Foto de perfil atualizada com sucesso', foto: result.rows[0].foto_perfil });
     } finally {
       client.release();
     }
   } catch (error) {
     console.error('Erro ao atualizar foto:', error.stack);
-    res.status(500).json({ error: 'Erro ao atualizar foto' });
+    res.status(500).json({ error: 'Erro ao atualizar foto', details: error.message });
   }
 });
 
@@ -210,6 +306,7 @@ app.post('/update-icon/:filhoId', async (req, res) => {
 
   try {
     if (!icon) {
+      console.log('Ícone não fornecido');
       return res.status(400).json({ error: 'Ícone não fornecido' });
     }
 
@@ -239,6 +336,7 @@ app.post('/update-background/:filhoId', async (req, res) => {
 
   try {
     if (!background) {
+      console.log('Fundo não fornecido');
       return res.status(400).json({ error: 'Fundo não fornecido' });
     }
 
@@ -357,6 +455,7 @@ app.post('/filho', async (req, res) => {
 
   try {
     if (!nome_completo || !senha || !telefone || !email || !pai_id) {
+      console.log('Dados da criança incompletos');
       return res.status(400).json({ error: 'Dados da criança incompletos' });
     }
 
@@ -393,6 +492,7 @@ app.post('/conta/adicionar-saldo', async (req, res) => {
 
   try {
     if (!pai_id || !valor || valor <= 0) {
+      console.log('Dados inválidos:', { pai_id, valor });
       return res.status(400).json({ error: 'Dados inválidos: ID do responsável e valor são obrigatórios e valor deve ser maior que 0' });
     }
 
@@ -437,6 +537,7 @@ app.post('/transacao', async (req, res) => {
 
   try {
     if (!conta_id || !tipo || !valor || !['transferencia', 'recebimento'].includes(tipo)) {
+      console.log('Dados da transação incompletos ou inválidos');
       return res.status(400).json({ error: 'Dados da transação incompletos ou inválidos' });
     }
 
@@ -469,6 +570,7 @@ app.post('/transferencia', async (req, res) => {
 
   try {
     if (!pai_id || !filho_id || !valor) {
+      console.log('Dados da transferência incompletos');
       return res.status(400).json({ error: 'Dados da transferência incompletos' });
     }
 
@@ -520,6 +622,7 @@ app.post('/penalizar', async (req, res) => {
 
   try {
     if (!pai_id || !filho_id || !valor || !motivo) {
+      console.log('Dados da penalidade incompletos');
       return res.status(400).json({ error: 'Dados da penalidade incompletos' });
     }
 
@@ -590,6 +693,7 @@ app.get('/notificacoes/:filhoId', async (req, res) => {
         'SELECT id, mensagem, data_criacao FROM notificacoes WHERE filho_id = $1 ORDER BY data_criacao DESC LIMIT 10',
         [filhoId]
       );
+      console.log('Notificações encontradas:', result.rows);
       res.status(200).json({ notificacoes: result.rows });
     } finally {
       client.release();
@@ -607,6 +711,7 @@ app.post('/transferencia/externa', async (req, res) => {
 
   try {
     if (!pai_id || !chave_pix || !valor) {
+      console.log('Dados da transferência incompleta');
       return res.status(400).json({ error: 'Dados da transferência incompleta: ID do responsável, chave PIX e valor são obrigatórios' });
     }
 
@@ -656,6 +761,7 @@ app.post('/tarefa', async (req, res) => {
 
   try {
     if (!filho_id || !descricao || valor === undefined) {
+      console.log('Dados da tarefa incompletos');
       return res.status(400).json({ error: 'Dados da tarefa incompletos' });
     }
 
@@ -734,76 +840,91 @@ app.get('/tarefas/filhos/:paiId', async (req, res) => {
 });
 
 // Endpoint para aprovar tarefa
+// Endpoint para aprovar tarefa
+// Endpoint para aprovar tarefa
+// Endpoint para aprovar tarefa
+// Endpoint para aprovar tarefa
 app.post('/tarefa/aprovar/:tarefaId', async (req, res) => {
   console.log('Requisição recebida em /tarefa/aprovar:', req.params.tarefaId);
   const { tarefaId } = req.params;
   const { pai_id, filho_id } = req.body;
 
+  let client = null; // Declarar client no início
   try {
     if (!pai_id || !filho_id) {
+      console.log('ID do responsável e da criança são obrigatórios');
       return res.status(400).json({ error: 'ID do responsável e da criança são obrigatórios' });
     }
 
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
-      await client.query('SET search_path TO banco_infantil');
+    client = await pool.connect();
+    await client.query('BEGIN');
+    await client.query('SET search_path TO banco_infantil');
 
-      // Verificar tarefa
-      const tarefaResult = await client.query('SELECT valor, status FROM tarefas WHERE id = $1 AND filho_id = $2', [tarefaId, filho_id]);
-      if (tarefaResult.rows.length === 0) {
-        await client.query('ROLLBACK');
-        return res.status(404).json({ error: 'Tarefa não encontrada' });
-      }
-      const tarefa = tarefaResult.rows[0];
-      if (tarefa.status !== 'concluida_pelo_filho') {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'Tarefa não está concluída pela criança' });
-      }
-
-      // Buscar a conta do responsável
-      const contaPaiResult = await client.query('SELECT id, saldo FROM contas WHERE pai_id = $1', [pai_id]);
-      if (contaPaiResult.rows.length === 0) {
-        await client.query('ROLLBACK');
-        return res.status(404).json({ error: 'Conta do responsável não encontrada' });
-      }
-      const contaId = contaPaiResult.rows[0].id;
-      const saldoPai = parseFloat(contaPaiResult.rows[0].saldo);
-
-      // Verificar saldo suficiente
-      if (saldoPai < tarefa.valor) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'Saldo insuficiente para aprovar a tarefa' });
-      }
-
-      // Atualizar status da tarefa
-      await client.query('UPDATE tarefas SET status = $1 WHERE id = $2', ['aprovada', tarefaId]);
-
-      // Deduzir do responsável
-      await client.query('UPDATE contas SET saldo = saldo - $1 WHERE pai_id = $2', [tarefa.valor, pai_id]);
-      // Adicionar à criança
-      await client.query('UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2', [tarefa.valor, filho_id]);
-      // Registrar transação
-      const result = await client.query(
-        'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ($1, $2, $3, $4, $5) RETURNING id',
-        [contaId, 'transferencia', tarefa.valor, `Recompensa por tarefa ${tarefaId}`, 'tarefa']
-      );
-
-      // Adicionar notificação para a criança
-      await client.query(
-        'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
-        [filho_id, `Sua tarefa foi aprovada! Você ganhou R$ ${tarefa.valor.toFixed(2)}.`, new Date()]
-      );
-
-      await client.query('COMMIT');
-      res.status(200).json({ transacao: result.rows[0], message: 'Tarefa aprovada com sucesso!' });
-    } finally {
-      client.release();
+    // Verificar tarefa
+    const tarefaResult = await client.query('SELECT valor, status FROM tarefas WHERE id = $1 AND filho_id = $2', [tarefaId, filho_id]);
+    if (tarefaResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Tarefa não encontrada' });
     }
+    const tarefa = tarefaResult.rows[0];
+    if (tarefa.status !== 'concluida_pelo_filho') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Tarefa não está concluída pela criança' });
+    }
+
+    // Validar e converter tarefa.valor para número
+    const valorTarefa = parseFloat(tarefa.valor);
+    if (isNaN(valorTarefa) || valorTarefa <= 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Valor da tarefa é inválido' });
+    }
+
+    // Buscar a conta do responsável
+    const contaPaiResult = await client.query('SELECT id, saldo FROM contas WHERE pai_id = $1', [pai_id]);
+    if (contaPaiResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Conta do responsável não encontrada' });
+    }
+    const contaId = contaPaiResult.rows[0].id;
+    const saldoPai = parseFloat(contaPaiResult.rows[0].saldo);
+
+    // Verificar saldo suficiente
+    if (saldoPai < valorTarefa) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Saldo insuficiente para aprovar a tarefa' });
+    }
+
+    // Atualizar status da tarefa
+    await client.query('UPDATE tarefas SET status = $1 WHERE id = $2', ['aprovada', tarefaId]);
+
+    // Deduzir do responsável
+    await client.query('UPDATE contas SET saldo = saldo - $1 WHERE pai_id = $2', [valorTarefa, pai_id]);
+    // Adicionar à criança
+    await client.query('UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2', [valorTarefa, filho_id]);
+    // Registrar transação
+    const result = await client.query(
+      'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+      [contaId, 'transferencia', valorTarefa, `Recompensa por tarefa ${tarefaId}`, 'tarefa']
+    );
+
+    // Adicionar notificação para a criança
+    await client.query(
+      'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
+      [filho_id, `Sua tarefa foi aprovada! Você ganhou R$ ${valorTarefa.toFixed(2)}.`, new Date()]
+    );
+
+    await client.query('COMMIT');
+    res.status(200).json({ transacao: result.rows[0], message: 'Tarefa aprovada com sucesso!' });
   } catch (error) {
-    await client.query('ROLLBACK');
+    if (client) {
+      await client.query('ROLLBACK');
+    }
     console.error('Erro ao aprovar tarefa:', error.stack);
     res.status(500).json({ error: 'Erro ao aprovar tarefa', details: error.message });
+  } finally {
+    if (client) {
+      client.release();
+    }
   }
 });
 
@@ -837,11 +958,13 @@ app.post('/mesada', async (req, res) => {
 
   try {
     if (!pai_id || !filho_id || !valor || valor <= 0 || !dia_semana) {
+      console.log('Dados inválidos:', { pai_id, filho_id, valor, dia_semana });
       return res.status(400).json({ error: 'Dados da mesada incompletos ou inválidos' });
     }
 
     const diasValidos = ['domingo', 'segunda', 'terca', 'quarta', 'quinta', 'sexta', 'sabado'];
     if (!diasValidos.includes(dia_semana)) {
+      console.log('Dia da semana inválido:', dia_semana);
       return res.status(400).json({ error: 'Dia da semana inválido' });
     }
 
@@ -849,6 +972,19 @@ app.post('/mesada', async (req, res) => {
     try {
       await client.query('BEGIN');
       await client.query('SET search_path TO banco_infantil');
+
+      // Verificar se pai e filho existem
+      const paiExists = await client.query('SELECT id FROM pais WHERE id = $1', [pai_id]);
+      if (paiExists.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Responsável não encontrado' });
+      }
+
+      const filhoExists = await client.query('SELECT id FROM filhos WHERE id = $1 AND pai_id = $2', [filho_id, pai_id]);
+      if (filhoExists.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Criança não encontrada ou não pertence ao responsável' });
+      }
 
       // Verificar se já existe mesada para a criança
       const mesadaExistente = await client.query(
@@ -864,6 +1000,12 @@ app.post('/mesada', async (req, res) => {
       const result = await client.query(
         'INSERT INTO mesadas (pai_id, filho_id, valor, dia_semana, ativo) VALUES ($1, $2, $3, $4, $5) RETURNING id',
         [pai_id, filho_id, valor, dia_semana, true]
+      );
+
+      // Adicionar notificação para a criança
+      await client.query(
+        'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
+        [filho_id, `Sua mesada de R$ ${valor.toFixed(2)} foi configurada para ${dia_semana}!`, new Date()]
       );
 
       await client.query('COMMIT');
@@ -886,11 +1028,13 @@ app.put('/mesada/:id', async (req, res) => {
 
   try {
     if (!pai_id || !filho_id || !valor || valor <= 0 || !dia_semana) {
+      console.log('Dados da mesada incompletos ou inválidos');
       return res.status(400).json({ error: 'Dados da mesada incompletos ou inválidos' });
     }
 
     const diasValidos = ['domingo', 'segunda', 'terca', 'quarta', 'quinta', 'sexta', 'sabado'];
     if (!diasValidos.includes(dia_semana)) {
+      console.log('Dia da semana inválido:', dia_semana);
       return res.status(400).json({ error: 'Dia da semana inválido' });
     }
 
@@ -913,6 +1057,12 @@ app.put('/mesada/:id', async (req, res) => {
       const result = await client.query(
         'UPDATE mesadas SET valor = $1, dia_semana = $2, ativo = $3 WHERE id = $4 RETURNING id',
         [valor, dia_semana, true, id]
+      );
+
+      // Adicionar notificação para a criança
+      await client.query(
+        'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
+        [filho_id, `Sua mesada foi atualizada para R$ ${valor.toFixed(2)} às ${dia_semana}!`, new Date()]
       );
 
       await client.query('COMMIT');
@@ -939,14 +1089,22 @@ app.delete('/mesada/:id', async (req, res) => {
       await client.query('SET search_path TO banco_infantil');
 
       // Verificar se a mesada existe
-      const mesadaExistente = await client.query('SELECT id FROM mesadas WHERE id = $1', [id]);
+      const mesadaExistente = await client.query('SELECT id, filho_id FROM mesadas WHERE id = $1', [id]);
       if (mesadaExistente.rows.length === 0) {
         await client.query('ROLLBACK');
         return res.status(404).json({ error: 'Mesada não encontrada' });
       }
 
+      const filhoId = mesadaExistente.rows[0].filho_id;
+
       // Excluir mesada
       await client.query('DELETE FROM mesadas WHERE id = $1', [id]);
+
+      // Adicionar notificação para a criança
+      await client.query(
+        'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
+        [filhoId, 'Sua mesada foi cancelada pelo responsável.', new Date()]
+      );
 
       await client.query('COMMIT');
       res.status(200).json({ message: 'Mesada excluída com sucesso!' });
@@ -961,6 +1119,7 @@ app.delete('/mesada/:id', async (req, res) => {
 });
 
 // Endpoint para listar mesadas
+// Endpoint para listar mesadas
 app.get('/mesadas/:paiId', async (req, res) => {
   console.log('Requisição recebida em /mesadas:', req.params.paiId);
   const { paiId } = req.params;
@@ -973,13 +1132,38 @@ app.get('/mesadas/:paiId', async (req, res) => {
         'SELECT m.id, m.filho_id, m.valor::float, m.dia_semana, m.ativo, f.nome_completo FROM mesadas m JOIN filhos f ON m.filho_id = f.id WHERE m.pai_id = $1',
         [paiId]
       );
-      res.status(200).json({ mesadas: result.rows });
+      console.log('Mesadas encontradas:', result.rows);
+      res.status(200).json({ mesadas: result.rows }); // Always return { mesadas: [...] }
     } finally {
       client.release();
     }
   } catch (error) {
     console.error('Erro ao listar mesadas:', error.stack);
-    res.status(500).json({ error: 'Erro ao listar mesadas', details: error.message });
+    res.status(500).json({ error: 'Erro ao listar mesadas', details: error.message, mesadas: [] }); // Fallback to empty array
+  }
+});
+
+// Novo endpoint para consultar mesada da criança
+app.get('/mesada/filho/:filhoId', async (req, res) => {
+  console.log('Requisição recebida em /mesada/filho:', req.params.filhoId);
+  const { filhoId } = req.params;
+
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query('SET search_path TO banco_infantil');
+      const result = await client.query(
+        'SELECT m.id, m.valor::float, m.dia_semana, m.ativo FROM mesadas m WHERE m.filho_id = $1',
+        [filhoId]
+      );
+      console.log('Mesada encontrada:', result.rows);
+      res.status(200).json({ mesada: result.rows[0] || null });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Erro ao consultar mesada da criança:', error.stack);
+    res.status(500).json({ error: 'Erro ao consultar mesada', details: error.message });
   }
 });
 

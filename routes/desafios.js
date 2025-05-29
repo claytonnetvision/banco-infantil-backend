@@ -1,4 +1,3 @@
-
 const express = require('express');
 const router = express.Router();
 const { Pool } = require('pg');
@@ -15,9 +14,9 @@ const pool = new Pool({
   database: process.env.DB_DATABASE,
   password: process.env.DB_PASSWORD,
   port: parseInt(process.env.DB_PORT),
-  max: 5,
-  idleTimeoutMillis: 10000,
-  connectionTimeoutMillis: 15000,
+  max: 10, // Aumentado de 5 para 10
+  idleTimeoutMillis: 30000, // Aumentado de 10000 para 30000
+  connectionTimeoutMillis: 20000, // Aumentado de 15000 para 20000
   ssl: {
     require: true,
     rejectUnauthorized: false
@@ -140,18 +139,6 @@ router.post('/conjunto', async (req, res) => {
       return res.status(400).json({ error: 'Saldo insuficiente para criar o conjunto de desafios.' });
     }
 
-    // Verificar conjunto pendente
-    console.log('Verificando conjunto pendente para criança:', { filho_id });
-    const conjuntoExistente = await client.query(
-      'SELECT id FROM conjuntos_desafios WHERE filho_id = $1 AND status = $2 AND automatico = false',
-      [filho_id, 'pendente']
-    );
-    if (conjuntoExistente.rows.length > 0) {
-      console.log('Conjunto pendente encontrado:', { conjuntoId: conjuntoExistente.rows[0].id });
-      await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'Já existe um conjunto de desafios manual pendente para esta criança.' });
-    }
-
     // Gerar perguntas
     console.log('Gerando perguntas...');
     const perguntas = [];
@@ -244,6 +231,7 @@ router.post('/conjunto', async (req, res) => {
 });
 
 router.post('/automatico/:filhoId', async (req, res) => {
+  console.log('Requisição recebida em /desafios/automatico/:filhoId:', req.params.filhoId);
   const { filhoId } = req.params;
   let client;
   try {
@@ -373,7 +361,7 @@ router.post('/automatico/:filhoId', async (req, res) => {
     if (client) {
       await client.query('ROLLBACK');
     }
-    console.error('Erro ao criar conjunto automático:', error);
+    console.error('Erro ao criar conjunto automático:', error.stack);
     res.status(500).json({ error: 'Erro ao criar conjunto automático', details: error.message });
   } finally {
     if (client) {
@@ -383,7 +371,7 @@ router.post('/automatico/:filhoId', async (req, res) => {
 });
 
 router.get('/crianca/:filho_id', async (req, res) => {
-  console.log('Requisição recebida em /desafios/crianca/:filho_id');
+  console.log('Requisição recebida em /desafios/crianca/:filho_id:', req.params.filho_id);
   const { filho_id } = req.params;
 
   let client;
@@ -406,7 +394,10 @@ router.get('/crianca/:filho_id', async (req, res) => {
 });
 
 router.post('/conjunto/:conjunto_id/responder', async (req, res) => {
-  console.log('Requisição recebida em /desafios/conjunto/:conjunto_id/responder');
+  console.log('Requisição recebida em /desafios/conjunto/:conjunto_id/responder:', {
+    conjunto_id: req.params.conjunto_id,
+    body: req.body
+  });
   const { conjunto_id } = req.params;
   const { filho_id, pergunta_id, resposta } = req.body;
 
@@ -416,27 +407,45 @@ router.post('/conjunto/:conjunto_id/responder', async (req, res) => {
     await client.query('BEGIN');
     await client.query('SET search_path TO banco_infantil');
 
+    // Buscar o conjunto
     const conjuntoResult = await client.query(
-      'SELECT perguntas, valor_recompensa, pai_id, automatico FROM conjuntos_desafios WHERE id = $1 AND filho_id = $2 AND status = $3',
+      'SELECT id, perguntas, valor_recompensa, pai_id, automatico FROM conjuntos_desafios WHERE id = $1 AND filho_id = $2 AND status = $3',
       [conjunto_id, filho_id, 'pendente']
     );
     if (conjuntoResult.rows.length === 0) {
       await client.query('ROLLBACK');
+      console.log('Conjunto não encontrado ou já concluído:', { conjunto_id, filho_id });
       return res.status(404).json({ error: 'Conjunto não encontrado ou já concluído' });
     }
     const conjunto = conjuntoResult.rows[0];
+
+    // Verificar a pergunta
     const pergunta = conjunto.perguntas.find(p => p.id === parseInt(pergunta_id));
     if (!pergunta) {
       await client.query('ROLLBACK');
+      console.log('Pergunta não encontrada:', { pergunta_id });
       return res.status(404).json({ error: 'Pergunta não encontrada' });
     }
 
+    // Verificar se a pergunta já foi respondida
+    const respostaExistente = await client.query(
+      'SELECT id FROM respostas_desafios WHERE conjunto_id = $1 AND crianca_id = $2 AND pergunta_id = $3',
+      [conjunto_id, filho_id, pergunta_id]
+    );
+    if (respostaExistente.rows.length > 0) {
+      await client.query('ROLLBACK');
+      console.log('Pergunta já respondida:', { conjunto_id, filho_id, pergunta_id });
+      return res.status(400).json({ error: 'Pergunta já respondida' });
+    }
+
+    // Avaliar a resposta
     const correta = parseInt(resposta) === parseInt(pergunta.resposta_correta);
     await client.query(
       'INSERT INTO respostas_desafios (conjunto_id, crianca_id, pergunta_id, resposta, correta) VALUES ($1, $2, $3, $4, $5)',
       [conjunto_id, filho_id, pergunta_id, resposta, correta]
     );
 
+    // Contar respostas e acertos
     const respostasResult = await client.query(
       'SELECT COUNT(*) as total, SUM(CASE WHEN correta THEN 1 ELSE 0 END) as acertos FROM respostas_desafios WHERE conjunto_id = $1',
       [conjunto_id]
@@ -446,20 +455,24 @@ router.post('/conjunto/:conjunto_id/responder', async (req, res) => {
     const totalPerguntas = conjunto.perguntas.length;
 
     let recompensa = 0;
-    if (conjunto.automatico) {
-      // Recompensa de R$ 1,00 a cada 10 acertos, máximo R$ 2,00
-      recompensa = Math.min(Math.floor(acertos / 10) * 1.00, 2.00);
-      if (recompensa > 0 && acertos % 10 === 0) {
-        await client.query('UPDATE contas SET saldo = saldo - $1 WHERE pai_id = $2', [1.00, conjunto.pai_id]);
-        await client.query('UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2', [1.00, filho_id]);
-        await client.query(
-          'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ((SELECT id FROM contas WHERE pai_id = $1), $2, $3, $4, $5)',
-          [conjunto.pai_id, 'transferencia', 1.00, `Recompensa por 10 acertos no conjunto automático ${conjunto_id}`, 'desafio_automatico']
-        );
-      }
-    } else {
-      // Recompensa total para desafios manuais
-      if (totalRespostas === totalPerguntas && acertos === totalPerguntas) {
+    let status = 'pendente';
+    let message = correta ? 'Resposta correta!' : `Resposta incorreta. ${pergunta.explicacao}`;
+
+    if (totalRespostas === totalPerguntas) {
+      status = acertos === totalPerguntas ? 'concluido' : 'falhou';
+      if (conjunto.automatico) {
+        // Recompensa de R$ 1,00 a cada 10 acertos, máximo R$ 2,00
+        recompensa = Math.min(Math.floor(acertos / 10) * 1.00, 2.00);
+        if (recompensa > 0) {
+          await client.query('UPDATE contas SET saldo = saldo - $1 WHERE pai_id = $2', [recompensa, conjunto.pai_id]);
+          await client.query('UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2', [recompensa, filho_id]);
+          await client.query(
+            'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ((SELECT id FROM contas WHERE pai_id = $1), $2, $3, $4, $5)',
+            [conjunto.pai_id, 'transferencia', recompensa, `Recompensa por conjunto automático ${conjunto_id}`, 'desafio_automatico']
+          );
+        }
+      } else if (acertos === totalPerguntas) {
+        // Recompensa total para desafios manuais
         recompensa = conjunto.valor_recompensa;
         await client.query('UPDATE contas SET saldo = saldo - $1 WHERE pai_id = $2', [recompensa, conjunto.pai_id]);
         await client.query('UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2', [recompensa, filho_id]);
@@ -468,14 +481,21 @@ router.post('/conjunto/:conjunto_id/responder', async (req, res) => {
           [conjunto.pai_id, 'transferencia', recompensa, `Recompensa por conjunto manual ${conjunto_id}`, 'desafio_manual']
         );
       }
-    }
+      await client.query('UPDATE conjuntos_desafios SET status = $1 WHERE id = $2', [status, conjunto_id]);
 
-    if (totalRespostas === totalPerguntas) {
-      await client.query('UPDATE conjuntos_desafios SET status = $1 WHERE id = $2', [acertos === totalPerguntas ? 'concluido' : 'falhou', conjunto_id]);
+      // Adicionar notificação
+      await client.query(
+        'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
+        [filho_id, `Você ${status === 'concluido' ? 'completou' : 'não completou'} o conjunto de desafios! ${recompensa > 0 ? `Ganhou R$ ${recompensa.toFixed(2)}.` : ''}`, new Date()]
+      );
+
+      message = status === 'concluido'
+        ? `Conjunto concluído!${recompensa > 0 ? ` Você ganhou R$ ${recompensa.toFixed(2)}!` : ''}`
+        : `Conjunto finalizado com ${acertos} de ${totalPerguntas} acertos. Tente novamente!`;
     }
 
     await client.query('COMMIT');
-    res.json({ correta, explicacao: pergunta.explicacao, recompensa });
+    res.json({ correta, explicacao: pergunta.explicacao, recompensa, status, message });
   } catch (error) {
     if (client) {
       await client.query('ROLLBACK');
@@ -490,7 +510,7 @@ router.post('/conjunto/:conjunto_id/responder', async (req, res) => {
 });
 
 router.get('/historico/pai/:pai_id', async (req, res) => {
-  console.log('Requisição recebida em /desafios/historico/pai/:pai_id');
+  console.log('Requisição recebida em /desafios/historico/pai/:pai_id:', req.params.pai_id);
   const { pai_id } = req.params;
 
   let client;
@@ -530,7 +550,7 @@ router.get('/historico/pai/:pai_id', async (req, res) => {
 });
 
 router.get('/historico/crianca/:filho_id', async (req, res) => {
-  console.log('Requisição recebida em /desafios/historico/crianca/:filho_id');
+  console.log('Requisição recebida em /desafios/historico/crianca/:filho_id:', req.params.filho_id);
   const { filho_id } = req.params;
 
   let client;
@@ -638,16 +658,21 @@ router.post('/gerar/:filhoId', async (req, res) => {
   let client;
   try {
     if (!modeloId || !valorTotal || !paiId) {
+      console.log('Parâmetros obrigatórios ausentes:', { modeloId, valorTotal, paiId });
       return res.status(400).json({ error: 'Modelo, valor total e ID do responsável são obrigatórios' });
     }
 
     if (!MODELOS_DESAFIOS[modeloId]) {
+      console.log('Modelo inválido:', { modeloId });
       return res.status(400).json({ error: 'Modelo inválido' });
     }
 
     client = await pool.connect();
+    await client.query('BEGIN');
     await client.query('SET search_path TO banco_infantil');
+
     // Verificar saldo do responsável
+    console.log('Verificando saldo do responsável:', { paiId });
     const contaPaiResult = await client.query('SELECT id, saldo FROM contas WHERE pai_id = $1', [paiId]);
     if (contaPaiResult.rows.length === 0) {
       await client.query('ROLLBACK');
@@ -655,6 +680,7 @@ router.post('/gerar/:filhoId', async (req, res) => {
     }
     const saldoPai = parseFloat(contaPaiResult.rows[0].saldo);
     if (saldoPai < valorTotal) {
+      console.log('Saldo insuficiente:', { saldoPai, valorTotal });
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'Saldo insuficiente para criar os desafios' });
     }
@@ -666,10 +692,12 @@ router.post('/gerar/:filhoId', async (req, res) => {
       [filhoId, today]
     );
     if (parseInt(desafiosExistentes.rows[0].count) > 0) {
+      console.log('Desafios pendentes encontrados para hoje:', { filhoId });
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'Já existem desafios pendentes para hoje' });
     }
 
+    // Gerar desafios
     const modelo = MODELOS_DESAFIOS[modeloId];
     const desafios = [];
 
@@ -719,6 +747,7 @@ router.post('/gerar/:filhoId', async (req, res) => {
     }
 
     // Inserir os desafios no banco
+    console.log('Inserindo desafios matemáticos:', { filhoId, desafiosCount: desafios.length });
     for (const desafio of desafios) {
       await client.query(
         'INSERT INTO desafios_matematicos (filho_id, tipo, pergunta, resposta_correta, valor, status) VALUES ($1, $2, $3, $4, $5, $6)',
@@ -780,16 +809,21 @@ router.post('/responder/:desafioId', async (req, res) => {
   let client;
   try {
     client = await pool.connect();
+    await client.query('BEGIN');
     await client.query('SET search_path TO banco_infantil');
+
+    // Buscar o desafio
     const desafioResult = await client.query(
       'SELECT resposta_correta, valor, status FROM desafios_matematicos WHERE id = $1 AND filho_id = $2',
       [desafioId, filhoId]
     );
     if (desafioResult.rows.length === 0) {
+      await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Desafio não encontrado' });
     }
     const desafio = desafioResult.rows[0];
     if (desafio.status !== 'pendente') {
+      await client.query('ROLLBACK');
       return res.status(400).json({ error: 'Desafio já foi respondido' });
     }
 
@@ -798,7 +832,10 @@ router.post('/responder/:desafioId', async (req, res) => {
     const acertou = Math.abs(resposta - respostaCorreta) < 0.01;
 
     // Marcar a resposta
-    await client.query('UPDATE desafios_matematicos SET status = $1 WHERE id = $2', [acertou ? 'acertado' : 'errado', desafioId]);
+    await client.query(
+      'UPDATE desafios_matematicos SET status = $1 WHERE id = $2',
+      [acertou ? 'acertado' : 'errado', desafioId]
+    );
 
     // Verificar se todos os desafios foram respondidos
     const today = new Date().toISOString().split('T')[0];
@@ -808,6 +845,8 @@ router.post('/responder/:desafioId', async (req, res) => {
     );
 
     const todosRespondidos = desafiosDia.rows.length === 15 && desafiosDia.rows.every(d => d.status !== 'pendente');
+    let message = acertou ? 'Resposta correta! Continue respondendo.' : 'Resposta incorreta! Continue respondendo as próximas perguntas.';
+
     if (todosRespondidos) {
       const todosAcertados = desafiosDia.rows.every(d => d.status === 'acertado');
       if (todosAcertados) {
@@ -825,21 +864,33 @@ router.post('/responder/:desafioId', async (req, res) => {
           return res.status(400).json({ error: 'Saldo insuficiente para recompensar o desafio' });
         }
 
-        await client.query('BEGIN');
         await client.query('UPDATE contas SET saldo = saldo - $1 WHERE pai_id = $2', [valorTotal, paiId]);
         await client.query('UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2', [valorTotal, filhoId]);
         await client.query(
           'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ($1, $2, $3, $4, $5)',
           [contaId, 'transferencia', valorTotal, `Recompensa por completar todos os desafios matemáticos do dia`, 'desafio_matematica']
         );
-        await client.query('COMMIT');
-        res.status(200).json({ message: `Parabéns! Você acertou todos os desafios e ganhou R$ ${valorTotal.toFixed(2)}!`, acertou, todosAcertados: true });
+
+        // Adicionar notificação
+        await client.query(
+          'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
+          [filhoId, `Você completou todos os desafios matemáticos do dia e ganhou R$ ${valorTotal.toFixed(2)}!`, new Date()]
+        );
+
+        message = `Parabéns! Você acertou todos os desafios e ganhou R$ ${valorTotal.toFixed(2)}!`;
       } else {
-        res.status(200).json({ message: acertou ? 'Resposta correta! Continue respondendo.' : 'Resposta incorreta! Você não acertou todos os desafios. Tente novamente amanhã ou use outra tentativa.', acertou, todosAcertados: false });
+        // Adicionar notificação
+        await client.query(
+          'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
+          [filhoId, 'Você não acertou todos os desafios matemáticos. Tente novamente amanhã!', new Date()]
+        );
+
+        message = 'Você não acertou todos os desafios. Tente novamente amanhã ou use outra tentativa.';
       }
-    } else {
-      res.status(200).json({ message: acertou ? 'Resposta correta! Continue respondendo.' : 'Resposta incorreta! Continue respondendo as próximas perguntas.', acertou, todosAcertados: false });
     }
+
+    await client.query('COMMIT');
+    res.status(200).json({ message, acertou, todosAcertados: todosRespondidos && desafiosDia.rows.every(d => d.status === 'acertado') });
   } catch (error) {
     if (client) {
       await client.query('ROLLBACK');
