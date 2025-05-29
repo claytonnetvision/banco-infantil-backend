@@ -1,8 +1,10 @@
+
 const express = require('express');
 const router = express.Router();
 const { Pool } = require('pg');
 const { PERGUNTAS_EDUCACAO_FINANCEIRA } = require('../DesafiosEducacaoFinanceira');
 const { PERGUNTAS_ORTOGRAFIA } = require('../DesafiosOrtografia');
+const { PERGUNTAS_CIENCIAS } = require('../DesafiosCiencias');
 const { getRandomInt, generateMathChallenge, MODELOS_DESAFIOS } = require('../DesafiosMatematicos');
 
 require('dotenv').config();
@@ -22,6 +24,62 @@ const pool = new Pool({
   }
 });
 
+// Função para embaralhar array (Fisher-Yates)
+function shuffleArray(array) {
+  const shuffled = [...array];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  return shuffled;
+}
+
+// Função para selecionar perguntas aleatórias sem repetição
+async function getRandomPerguntas(filho_id, tipo, quantidade, perguntasEstaticas) {
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('SET search_path TO banco_infantil');
+
+    // Buscar perguntas já usadas
+    const usadasResult = await client.query(
+      'SELECT pergunta_id FROM perguntas_usadas WHERE filho_id = $1 AND tipo = $2',
+      [filho_id, tipo]
+    );
+    const usadas = usadasResult.rows.map(row => row.pergunta_id);
+
+    // Filtrar perguntas não usadas
+    let disponiveis = perguntasEstaticas.filter(p => !usadas.includes(p.id));
+    
+    // Se não houver disponíveis, reiniciar o ciclo
+    if (disponiveis.length < quantidade) {
+      await client.query(
+        'DELETE FROM perguntas_usadas WHERE filho_id = $1 AND tipo = $2',
+        [filho_id, tipo]
+      );
+      disponiveis = [...perguntasEstaticas];
+    }
+
+    // Embaralhar e selecionar
+    const selecionadas = shuffleArray(disponiveis).slice(0, quantidade);
+
+    // Registrar perguntas usadas
+    for (const pergunta of selecionadas) {
+      await client.query(
+        'INSERT INTO perguntas_usadas (filho_id, tipo, pergunta_id) VALUES ($1, $2, $3)',
+        [filho_id, tipo, pergunta.id]
+      );
+    }
+
+    return selecionadas;
+  } catch (error) {
+    console.error(`Erro ao selecionar perguntas ${tipo}:`, error);
+    throw error;
+  } finally {
+    if (client) client.release();
+  }
+}
+
 router.post('/conjunto', async (req, res) => {
   console.log('Requisição recebida em /desafios/conjunto:', JSON.stringify(req.body, null, 2));
   const { pai_id, filho_id, tipo_desafios, valor_recompensa } = req.body;
@@ -32,13 +90,15 @@ router.post('/conjunto', async (req, res) => {
     console.log('Validando parâmetros...');
     if (!pai_id || !filho_id || !tipo_desafios || !valor_recompensa || valor_recompensa <= 0) {
       console.log('Parâmetros inválidos:', { pai_id, filho_id, tipo_desafios, valor_recompensa });
-      return res.status(400).json({ error: 'Parâmetros inválidos: pai_id, filho_id, tipo_desafios e valor_recompensa são obrigatórios' });
+      return res.status(400).json({ error: 'Parâmetros inválidos: pai_id, filho_id, tipo_desafios e valor_recompensa são obrigatórios.' });
     }
 
-    const totalPerguntas = (tipo_desafios.educacao_financeira || 0) + (tipo_desafios.ortografia || 0);
-    if (totalPerguntas !== 10) {
+    const totalPerguntas = (tipo_desafios.educacao_financeira || 0) + 
+                          (tipo_desafios.ortografia || 0) + 
+                          (tipo_desafios.ciencias || 0);
+    if (totalPerguntas < 1) {
       console.log('Total de perguntas inválido:', { totalPerguntas });
-      return res.status(400).json({ error: 'O total de perguntas deve ser exatamente 10' });
+      return res.status(400).json({ error: 'O total de perguntas deve ser pelo menos 1.' });
     }
 
     // Conexão ao banco
@@ -62,7 +122,7 @@ router.post('/conjunto', async (req, res) => {
     if (filhoResult.rows.length === 0) {
       console.log('Criança não encontrada ou não pertence ao pai:', { filho_id, pai_id });
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Criança não encontrada ou não pertence ao responsável' });
+      return res.status(404).json({ error: 'Criança não encontrada ou não pertence ao responsável.' });
     }
 
     // Verificar saldo do responsável
@@ -71,36 +131,25 @@ router.post('/conjunto', async (req, res) => {
     if (contaPaiResult.rows.length === 0) {
       console.log('Conta do responsável não encontrada:', { pai_id });
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Conta do responsável não encontrada' });
+      return res.status(404).json({ error: 'Conta do responsável não encontrada.' });
     }
     const saldoPai = parseFloat(contaPaiResult.rows[0].saldo);
     if (saldoPai < valor_recompensa) {
       console.log('Saldo insuficiente:', { saldoPai, valor_recompensa });
       await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'Saldo insuficiente para criar o conjunto de desafios' });
+      return res.status(400).json({ error: 'Saldo insuficiente para criar o conjunto de desafios.' });
     }
 
     // Verificar conjunto pendente
     console.log('Verificando conjunto pendente para criança:', { filho_id });
     const conjuntoExistente = await client.query(
-      'SELECT id FROM conjuntos_desafios WHERE filho_id = $1 AND status = $2',
+      'SELECT id FROM conjuntos_desafios WHERE filho_id = $1 AND status = $2 AND automatico = false',
       [filho_id, 'pendente']
     );
     if (conjuntoExistente.rows.length > 0) {
       console.log('Conjunto pendente encontrado:', { conjuntoId: conjuntoExistente.rows[0].id });
       await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'Já existe um conjunto de desafios pendente para esta criança' });
-    }
-
-    // Verificar importação das perguntas
-    console.log('Verificando perguntas disponíveis:', {
-      educacaoFinanceiraCount: PERGUNTAS_EDUCACAO_FINANCEIRA.length,
-      ortografiaCount: PERGUNTAS_ORTOGRAFIA.length
-    });
-    if (!PERGUNTAS_EDUCACAO_FINANCEIRA.length || !PERGUNTAS_ORTOGRAFIA.length) {
-      console.log('Erro: perguntas não importadas corretamente');
-      await client.query('ROLLBACK');
-      return res.status(500).json({ error: 'Erro interno: perguntas não disponíveis' });
+      return res.status(400).json({ error: 'Já existe um conjunto de desafios manual pendente para esta criança.' });
     }
 
     // Gerar perguntas
@@ -108,35 +157,68 @@ router.post('/conjunto', async (req, res) => {
     const perguntas = [];
     let idCounter = 1;
 
-    for (let i = 0; i < tipo_desafios.educacao_financeira; i++) {
-      const pergunta = PERGUNTAS_EDUCACAO_FINANCEIRA[i % PERGUNTAS_EDUCACAO_FINANCEIRA.length];
-      perguntas.push({
-        id: idCounter++,
-        tipo: 'educacao_financeira',
-        pergunta: pergunta.pergunta,
-        opcoes: pergunta.opcoes,
-        resposta_correta: pergunta.resposta_correta,
-        explicacao: pergunta.explicacao
+    if (tipo_desafios.educacao_financeira > 0) {
+      const perguntasFinanceira = await getRandomPerguntas(
+        filho_id,
+        'educacao_financeira',
+        tipo_desafios.educacao_financeira,
+        PERGUNTAS_EDUCACAO_FINANCEIRA
+      );
+      perguntasFinanceira.forEach(pergunta => {
+        perguntas.push({
+          id: idCounter++,
+          tipo: 'educacao_financeira',
+          pergunta: pergunta.pergunta,
+          opcoes: pergunta.opcoes,
+          resposta_correta: pergunta.resposta_correta,
+          explicacao: pergunta.explicacao
+        });
       });
     }
 
-    for (let i = 0; i < tipo_desafios.ortografia; i++) {
-      const pergunta = PERGUNTAS_ORTOGRAFIA[i % PERGUNTAS_ORTOGRAFIA.length];
-      perguntas.push({
-        id: idCounter++,
-        tipo: 'ortografia',
-        pergunta: pergunta.pergunta,
-        opcoes: pergunta.opcoes,
-        resposta_correta: pergunta.resposta_correta,
-        explicacao: pergunta.explicacao
+    if (tipo_desafios.ortografia > 0) {
+      const perguntasOrtografia = await getRandomPerguntas(
+        filho_id,
+        'ortografia',
+        tipo_desafios.ortografia,
+        PERGUNTAS_ORTOGRAFIA
+      );
+      perguntasOrtografia.forEach(pergunta => {
+        perguntas.push({
+          id: idCounter++,
+          tipo: 'ortografia',
+          pergunta: pergunta.pergunta,
+          opcoes: pergunta.opcoes,
+          resposta_correta: pergunta.resposta_correta,
+          explicacao: pergunta.explicacao
+        });
+      });
+    }
+
+    if (tipo_desafios.ciencias > 0) {
+      const perguntasCiencias = await getRandomPerguntas(
+        filho_id,
+        'ciencias',
+        tipo_desafios.ciencias,
+        PERGUNTAS_CIENCIAS
+      );
+      perguntasCiencias.forEach(pergunta => {
+        perguntas.push({
+          id: idCounter++,
+          tipo: 'ciencias',
+          pergunta: pergunta.pergunta,
+          opcoes: pergunta.opcoes,
+          resposta_correta: pergunta.resposta_correta,
+          explicacao: pergunta.explicacao
+        });
       });
     }
 
     // Inserir conjunto no banco
     console.log('Inserindo conjunto no banco:', { pai_id, filho_id, valor_recompensa, perguntasCount: perguntas.length });
     const result = await client.query(
-      'INSERT INTO conjuntos_desafios (pai_id, filho_id, tipos, perguntas, valor_recompensa, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-      [pai_id, filho_id, JSON.stringify(tipo_desafios), JSON.stringify(perguntas), valor_recompensa, 'pendente']
+      'INSERT INTO conjuntos_desafios (pai_id, filho_id, tipos, perguntas, valor_recompensa, status, automatico) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
+      [pai_id, filho_id, JSON.stringify(tipo_desafios), JSON.stringify(perguntas), valor_recompensa, 'pendente', false]
     );
 
     await client.query('COMMIT');
@@ -161,6 +243,145 @@ router.post('/conjunto', async (req, res) => {
   }
 });
 
+router.post('/automatico/:filhoId', async (req, res) => {
+  const { filhoId } = req.params;
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+    await client.query('SET search_path TO banco_infantil');
+
+    // Verificar existência da criança
+    const filhoResult = await client.query('SELECT id, pai_id FROM filhos WHERE id = $1', [filhoId]);
+    if (filhoResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Criança não encontrada.' });
+    }
+    const pai_id = filhoResult.rows[0].pai_id;
+
+    // Verificar conjunto automático pendente
+    const conjuntoExistente = await client.query(
+      'SELECT id FROM conjuntos_desafios WHERE filho_id = $1 AND status = $2 AND automatico = true AND DATE(criado_em) = CURRENT_DATE',
+      [filhoId, 'pendente']
+    );
+    if (conjuntoExistente.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Já existe um conjunto automático pendente para hoje.' });
+    }
+
+    // Verificar saldo do responsável
+    const contaPaiResult = await client.query('SELECT id, saldo FROM contas WHERE pai_id = $1', [pai_id]);
+    if (contaPaiResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Conta do responsável não encontrada.' });
+    }
+    const saldoPai = parseFloat(contaPaiResult.rows[0].saldo);
+    const valorRecompensa = 2.00; // Máximo R$ 2,00 por dia
+    if (saldoPai < valorRecompensa) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Saldo insuficiente para criar o conjunto automático.' });
+    }
+
+    // Definir tipos de desafios (5 de cada)
+    const tipo_desafios = {
+      educacao_financeira: 5,
+      ortografia: 5,
+      ciencias: 5,
+      matematica: 5
+    };
+
+    // Gerar perguntas
+    const perguntas = [];
+    let idCounter = 1;
+
+    // Educação Financeira
+    const perguntasFinanceira = await getRandomPerguntas(
+      filhoId,
+      'educacao_financeira',
+      tipo_desafios.educacao_financeira,
+      PERGUNTAS_EDUCACAO_FINANCEIRA
+    );
+    perguntasFinanceira.forEach(pergunta => {
+      perguntas.push({
+        id: idCounter++,
+        tipo: 'educacao_financeira',
+        pergunta: pergunta.pergunta,
+        opcoes: pergunta.opcoes,
+        resposta_correta: pergunta.resposta_correta,
+        explicacao: pergunta.explicacao
+      });
+    });
+
+    // Ortografia
+    const perguntasOrtografia = await getRandomPerguntas(
+      filhoId,
+      'ortografia',
+      tipo_desafios.ortografia,
+      PERGUNTAS_ORTOGRAFIA
+    );
+    perguntasOrtografia.forEach(pergunta => {
+      perguntas.push({
+        id: idCounter++,
+        tipo: 'ortografia',
+        pergunta: pergunta.pergunta,
+        opcoes: pergunta.opcoes,
+        resposta_correta: pergunta.resposta_correta,
+        explicacao: pergunta.explicacao
+      });
+    });
+
+    // Ciências
+    const perguntasCiencias = await getRandomPerguntas(
+      filhoId,
+      'ciencias',
+      tipo_desafios.ciencias,
+      PERGUNTAS_CIENCIAS
+    );
+    perguntasCiencias.forEach(pergunta => {
+      perguntas.push({
+        id: idCounter++,
+        tipo: 'ciencias',
+        pergunta: pergunta.pergunta,
+        opcoes: pergunta.opcoes,
+        resposta_correta: pergunta.resposta_correta,
+        explicacao: pergunta.explicacao
+      });
+    });
+
+    // Matemática
+    for (let i = 0; i < tipo_desafios.matematica; i++) {
+      const desafio = generateMathChallenge();
+      perguntas.push({
+        id: idCounter++,
+        tipo: 'matematica',
+        pergunta: desafio.pergunta,
+        opcoes: null,
+        resposta_correta: desafio.respostaCorreta,
+        explicacao: `A resposta correta é ${desafio.respostaCorreta}.`
+      });
+    }
+
+    // Inserir conjunto no banco
+    const result = await client.query(
+      'INSERT INTO conjuntos_desafios (pai_id, filho_id, tipos, perguntas, valor_recompensa, status, automatico) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
+      [pai_id, filhoId, JSON.stringify(tipo_desafios), JSON.stringify(perguntas), valorRecompensa, 'pendente', true]
+    );
+
+    await client.query('COMMIT');
+    res.status(201).json({ conjunto: result.rows[0], message: 'Conjunto automático criado com sucesso' });
+  } catch (error) {
+    if (client) {
+      await client.query('ROLLBACK');
+    }
+    console.error('Erro ao criar conjunto automático:', error);
+    res.status(500).json({ error: 'Erro ao criar conjunto automático', details: error.message });
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+});
+
 router.get('/crianca/:filho_id', async (req, res) => {
   console.log('Requisição recebida em /desafios/crianca/:filho_id');
   const { filho_id } = req.params;
@@ -170,7 +391,7 @@ router.get('/crianca/:filho_id', async (req, res) => {
     client = await pool.connect();
     await client.query('SET search_path TO banco_infantil');
     const result = await client.query(
-      'SELECT * FROM conjuntos_desafios WHERE filho_id = $1 AND status = $2 LIMIT 1',
+      'SELECT * FROM conjuntos_desafios WHERE filho_id = $1 AND status = $2 ORDER BY automatico DESC LIMIT 1',
       [filho_id, 'pendente']
     );
     res.json({ conjunto: result.rows[0] || null });
@@ -196,7 +417,7 @@ router.post('/conjunto/:conjunto_id/responder', async (req, res) => {
     await client.query('SET search_path TO banco_infantil');
 
     const conjuntoResult = await client.query(
-      'SELECT perguntas, valor_recompensa, pai_id FROM conjuntos_desafios WHERE id = $1 AND filho_id = $2 AND status = $3',
+      'SELECT perguntas, valor_recompensa, pai_id, automatico FROM conjuntos_desafios WHERE id = $1 AND filho_id = $2 AND status = $3',
       [conjunto_id, filho_id, 'pendente']
     );
     if (conjuntoResult.rows.length === 0) {
@@ -210,7 +431,7 @@ router.post('/conjunto/:conjunto_id/responder', async (req, res) => {
       return res.status(404).json({ error: 'Pergunta não encontrada' });
     }
 
-    const correta = parseInt(resposta) === pergunta.resposta_correta;
+    const correta = parseInt(resposta) === parseInt(pergunta.resposta_correta);
     await client.query(
       'INSERT INTO respostas_desafios (conjunto_id, crianca_id, pergunta_id, resposta, correta) VALUES ($1, $2, $3, $4, $5)',
       [conjunto_id, filho_id, pergunta_id, resposta, correta]
@@ -220,21 +441,41 @@ router.post('/conjunto/:conjunto_id/responder', async (req, res) => {
       'SELECT COUNT(*) as total, SUM(CASE WHEN correta THEN 1 ELSE 0 END) as acertos FROM respostas_desafios WHERE conjunto_id = $1',
       [conjunto_id]
     );
-    if (parseInt(respostasResult.rows[0].total) === 10) {
-      const todosCorretos = parseInt(respostasResult.rows[0].acertos) === 10;
-      if (todosCorretos) {
-        await client.query('UPDATE contas SET saldo = saldo - $1 WHERE pai_id = $2', [conjunto.valor_recompensa, conjunto.pai_id]);
-        await client.query('UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2', [conjunto.valor_recompensa, filho_id]);
+    const totalRespostas = parseInt(respostasResult.rows[0].total);
+    const acertos = parseInt(respostasResult.rows[0].acertos);
+    const totalPerguntas = conjunto.perguntas.length;
+
+    let recompensa = 0;
+    if (conjunto.automatico) {
+      // Recompensa de R$ 1,00 a cada 10 acertos, máximo R$ 2,00
+      recompensa = Math.min(Math.floor(acertos / 10) * 1.00, 2.00);
+      if (recompensa > 0 && acertos % 10 === 0) {
+        await client.query('UPDATE contas SET saldo = saldo - $1 WHERE pai_id = $2', [1.00, conjunto.pai_id]);
+        await client.query('UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2', [1.00, filho_id]);
         await client.query(
-          'INSERT INTO transacoes (conta_id, tipo, valor, descricao) VALUES ((SELECT id FROM contas WHERE pai_id = $1), $2, $3, $4)',
-          [conjunto.pai_id, 'transferencia', conjunto.valor_recompensa, `Recompensa por conjunto de desafios ${conjunto_id}`]
+          'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ((SELECT id FROM contas WHERE pai_id = $1), $2, $3, $4, $5)',
+          [conjunto.pai_id, 'transferencia', 1.00, `Recompensa por 10 acertos no conjunto automático ${conjunto_id}`, 'desafio_automatico']
         );
       }
-      await client.query('UPDATE conjuntos_desafios SET status = $1 WHERE id = $2', [todosCorretos ? 'concluido' : 'falhou', conjunto_id]);
+    } else {
+      // Recompensa total para desafios manuais
+      if (totalRespostas === totalPerguntas && acertos === totalPerguntas) {
+        recompensa = conjunto.valor_recompensa;
+        await client.query('UPDATE contas SET saldo = saldo - $1 WHERE pai_id = $2', [recompensa, conjunto.pai_id]);
+        await client.query('UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2', [recompensa, filho_id]);
+        await client.query(
+          'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ((SELECT id FROM contas WHERE pai_id = $1), $2, $3, $4, $5)',
+          [conjunto.pai_id, 'transferencia', recompensa, `Recompensa por conjunto manual ${conjunto_id}`, 'desafio_manual']
+        );
+      }
+    }
+
+    if (totalRespostas === totalPerguntas) {
+      await client.query('UPDATE conjuntos_desafios SET status = $1 WHERE id = $2', [acertos === totalPerguntas ? 'concluido' : 'falhou', conjunto_id]);
     }
 
     await client.query('COMMIT');
-    res.json({ correta, explicacao: pergunta.explicacao });
+    res.json({ correta, explicacao: pergunta.explicacao, recompensa });
   } catch (error) {
     if (client) {
       await client.query('ROLLBACK');
@@ -258,7 +499,8 @@ router.get('/historico/pai/:pai_id', async (req, res) => {
     await client.query('SET search_path TO banco_infantil');
     const result = await client.query(
       `SELECT cd.id, cd.tipos, cd.valor_recompensa, cd.criado_em, f.nome_completo as crianca_nome,
-              (SELECT COUNT(*) FROM respostas_desafios rd WHERE rd.conjunto_id = cd.id AND rd.correta) as acertos
+              (SELECT COUNT(*) FROM respostas_desafios rd WHERE rd.conjunto_id = cd.id AND rd.correta) as acertos,
+              cd.automatico
        FROM conjuntos_desafios cd
        JOIN filhos f ON cd.filho_id = f.id
        WHERE cd.pai_id = $1
@@ -272,7 +514,9 @@ router.get('/historico/pai/:pai_id', async (req, res) => {
         valor_recompensa: parseFloat(row.valor_recompensa),
         crianca_nome: row.crianca_nome,
         acertos: parseInt(row.acertos),
+        total_perguntas: Object.values(row.tipos).reduce((a, b) => a + b, 0),
         data_criacao: row.criado_em,
+        automatico: row.automatico
       }))
     });
   } catch (error) {
@@ -295,7 +539,8 @@ router.get('/historico/crianca/:filho_id', async (req, res) => {
     await client.query('SET search_path TO banco_infantil');
     const result = await client.query(
       `SELECT cd.id, cd.tipos, cd.valor_recompensa, cd.criado_em, f.nome_completo as crianca_nome,
-              (SELECT COUNT(*) FROM respostas_desafios rd WHERE rd.conjunto_id = cd.id AND rd.correta) as acertos
+              (SELECT COUNT(*) FROM respostas_desafios rd WHERE rd.conjunto_id = cd.id AND rd.correta) as acertos,
+              cd.automatico
        FROM conjuntos_desafios cd
        JOIN filhos f ON cd.filho_id = f.id
        WHERE cd.filho_id = $1
@@ -309,7 +554,9 @@ router.get('/historico/crianca/:filho_id', async (req, res) => {
         valor_recompensa: parseFloat(row.valor_recompensa),
         crianca_nome: row.crianca_nome,
         acertos: parseInt(row.acertos),
+        total_perguntas: Object.values(row.tipos).reduce((a, b) => a + b, 0),
         data_criacao: row.criado_em,
+        automatico: row.automatico
       }))
     });
   } catch (error) {
@@ -582,8 +829,8 @@ router.post('/responder/:desafioId', async (req, res) => {
         await client.query('UPDATE contas SET saldo = saldo - $1 WHERE pai_id = $2', [valorTotal, paiId]);
         await client.query('UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2', [valorTotal, filhoId]);
         await client.query(
-          'INSERT INTO transacoes (conta_id, tipo, valor, descricao) VALUES ($1, $2, $3, $4)',
-          [contaId, 'transferencia', valorTotal, `Recompensa por completar todos os desafios matemáticos do dia`]
+          'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ($1, $2, $3, $4, $5)',
+          [contaId, 'transferencia', valorTotal, `Recompensa por completar todos os desafios matemáticos do dia`, 'desafio_matematica']
         );
         await client.query('COMMIT');
         res.status(200).json({ message: `Parabéns! Você acertou todos os desafios e ganhou R$ ${valorTotal.toFixed(2)}!`, acertou, todosAcertados: true });

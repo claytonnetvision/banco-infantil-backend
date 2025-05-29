@@ -10,6 +10,7 @@ const fsPromises = require('fs').promises;
 const AdmZip = require('adm-zip');
 const crypto = require('crypto');
 const desafiosRouter = require('./routes/desafios');
+const { executarTarefasDiarias } = require('./Agendador');
 const app = express();
 
 // Configuração do CORS - Permitir todas as origens
@@ -413,8 +414,8 @@ app.post('/conta/adicionar-saldo', async (req, res) => {
 
       // Registrar transação
       const result = await client.query(
-        'INSERT INTO transacoes (conta_id, tipo, valor, descricao) VALUES ($1, $2, $3, $4) RETURNING id',
-        [contaId, 'recebimento', valor, 'Adição de saldo pelo responsável']
+        'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+        [contaId, 'recebimento', valor, 'Adição de saldo pelo responsável', 'adicao_saldo']
       );
 
       await client.query('COMMIT');
@@ -446,8 +447,8 @@ app.post('/transacao', async (req, res) => {
       const valorAtualizado = tipo === 'transferencia' ? -valor : valor;
       await client.query('UPDATE contas SET saldo = saldo + $1 WHERE id = $2', [valorAtualizado, conta_id]);
       const result = await client.query(
-        'INSERT INTO transacoes (conta_id, tipo, valor, descricao) VALUES ($1, $2, $3, $4) RETURNING id',
-        [conta_id, tipo, valor, descricao]
+        'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+        [conta_id, tipo, valor, descricao, 'manual']
       );
       await client.query('COMMIT');
       res.status(201).json({ transacao: result.rows[0], message: 'Transação realizada com sucesso!' });
@@ -497,8 +498,8 @@ app.post('/transferencia', async (req, res) => {
       await client.query('UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2', [valor, filho_id]);
       // Registrar transação
       const result = await client.query(
-        'INSERT INTO transacoes (conta_id, tipo, valor, descricao) VALUES ($1, $2, $3, $4) RETURNING id',
-        [contaId, 'transferencia', valor, descricao || `Transferência para criança ${filho_id}`]
+        'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+        [contaId, 'transferencia', valor, descricao || `Transferência para criança ${filho_id}`, 'transferencia']
       );
       await client.query('COMMIT');
       res.status(201).json({ transacao: result.rows[0], message: 'Transferência realizada com sucesso!' });
@@ -554,8 +555,8 @@ app.post('/penalizar', async (req, res) => {
       await client.query('UPDATE contas SET saldo = saldo + $1 WHERE pai_id = $2', [valor, pai_id]);
       // Registrar transação
       const result = await client.query(
-        'INSERT INTO transacoes (conta_id, tipo, valor, descricao) VALUES ($1, $2, $3, $4) RETURNING id',
-        [contaId, 'penalidade', valor, `Penalidade para criança ${filho_id}: ${motivo}`]
+        'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+        [contaId, 'penalidade', valor, `Penalidade para criança ${filho_id}: ${motivo}`, 'penalidade']
       );
 
       // Adicionar notificação para a criança
@@ -633,8 +634,8 @@ app.post('/transferencia/externa', async (req, res) => {
       await client.query('UPDATE contas SET saldo = saldo - $1 WHERE pai_id = $2', [valor, pai_id]);
       // Registrar transação
       const result = await client.query(
-        'INSERT INTO transacoes (conta_id, tipo, valor, descricao) VALUES ($1, $2, $3, $4) RETURNING id',
-        [contaId, 'pix_externo', valor, descricao || `Pix para ${chave_pix}`]
+        'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+        [contaId, 'pix_externo', valor, descricao || `Pix para ${chave_pix}`, 'pix_externo']
       );
       await client.query('COMMIT');
       res.status(201).json({ transacao: result.rows[0], message: 'Pix enviado com sucesso!' });
@@ -727,36 +728,8 @@ app.get('/tarefas/filhos/:paiId', async (req, res) => {
       client.release();
     }
   } catch (error) {
-    console.error('Erro ao listar tarefas das crianças:', error.stack);
-    res.status(500).json({ error: 'Erro ao listar tarefas das crianças', details: error.message });
-  }
-});
-
-// Endpoint para a criança marcar tarefa como concluída
-app.post('/tarefa/marcar-concluida/:tarefaId', async (req, res) => {
-  console.log('Requisição recebida em /tarefa/marcar-concluida:', req.params.tarefaId);
-  const { tarefaId } = req.params;
-
-  try {
-    const client = await pool.connect();
-    try {
-      await client.query('SET search_path TO banco_infantil');
-      const tarefaResult = await client.query('SELECT status FROM tarefas WHERE id = $1', [tarefaId]);
-      if (tarefaResult.rows.length === 0) {
-        return res.status(404).json({ error: 'Tarefa não encontrada' });
-      }
-      if (tarefaResult.rows[0].status !== 'pendente') {
-        return res.status(400).json({ error: 'Tarefa não está pendente' });
-      }
-
-      await client.query('UPDATE tarefas SET status = $1 WHERE id = $2', ['concluida_pelo_filho', tarefaId]);
-      res.status(200).json({ message: 'Tarefa marcada como concluída!' });
-    } finally {
-      client.release();
-    }
-  } catch (error) {
-    console.error('Erro ao marcar tarefa:', error.stack);
-    res.status(500).json({ error: 'Erro ao marcar tarefa', details: error.message });
+    console.error('Erro ao listar tarefas:', error.stack);
+    res.status(500).json({ error: 'Erro ao listar tarefas', details: error.message });
   }
 });
 
@@ -767,23 +740,26 @@ app.post('/tarefa/aprovar/:tarefaId', async (req, res) => {
   const { pai_id, filho_id } = req.body;
 
   try {
+    if (!pai_id || !filho_id) {
+      return res.status(400).json({ error: 'ID do responsável e da criança são obrigatórios' });
+    }
+
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
       await client.query('SET search_path TO banco_infantil');
 
-      // Buscar a tarefa
-      const tarefaResult = await client.query('SELECT valor, status FROM tarefas WHERE id = $1', [tarefaId]);
+      // Verificar tarefa
+      const tarefaResult = await client.query('SELECT valor, status FROM tarefas WHERE id = $1 AND filho_id = $2', [tarefaId, filho_id]);
       if (tarefaResult.rows.length === 0) {
         await client.query('ROLLBACK');
         return res.status(404).json({ error: 'Tarefa não encontrada' });
       }
-      if (tarefaResult.rows[0].status !== 'concluida_pelo_filho') {
+      const tarefa = tarefaResult.rows[0];
+      if (tarefa.status !== 'concluida_pelo_filho') {
         await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'Tarefa não foi marcada como concluída pela criança' });
+        return res.status(400).json({ error: 'Tarefa não está concluída pela criança' });
       }
-
-      const valor = parseFloat(tarefaResult.rows[0].valor);
 
       // Buscar a conta do responsável
       const contaPaiResult = await client.query('SELECT id, saldo FROM contas WHERE pai_id = $1', [pai_id]);
@@ -795,24 +771,32 @@ app.post('/tarefa/aprovar/:tarefaId', async (req, res) => {
       const saldoPai = parseFloat(contaPaiResult.rows[0].saldo);
 
       // Verificar saldo suficiente
-      if (saldoPai < valor) {
+      if (saldoPai < tarefa.valor) {
         await client.query('ROLLBACK');
         return res.status(400).json({ error: 'Saldo insuficiente para aprovar a tarefa' });
       }
 
-      // Deduzir do responsável
-      await client.query('UPDATE contas SET saldo = saldo - $1 WHERE id = $2', [valor, contaId]);
-      // Adicionar à criança
-      await client.query('UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2', [valor, filho_id]);
-      // Atualizar tarefa
+      // Atualizar status da tarefa
       await client.query('UPDATE tarefas SET status = $1 WHERE id = $2', ['aprovada', tarefaId]);
+
+      // Deduzir do responsável
+      await client.query('UPDATE contas SET saldo = saldo - $1 WHERE pai_id = $2', [tarefa.valor, pai_id]);
+      // Adicionar à criança
+      await client.query('UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2', [tarefa.valor, filho_id]);
       // Registrar transação
-      await client.query(
-        'INSERT INTO transacoes (conta_id, tipo, valor, descricao) VALUES ($1, $2, $3, $4)',
-        [contaId, 'transferencia', valor, `Pagamento por tarefa ${tarefaId}`]
+      const result = await client.query(
+        'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+        [contaId, 'transferencia', tarefa.valor, `Recompensa por tarefa ${tarefaId}`, 'tarefa']
       );
+
+      // Adicionar notificação para a criança
+      await client.query(
+        'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
+        [filho_id, `Sua tarefa foi aprovada! Você ganhou R$ ${tarefa.valor.toFixed(2)}.`, new Date()]
+      );
+
       await client.query('COMMIT');
-      res.status(200).json({ message: 'Tarefa aprovada e valor transferido!' });
+      res.status(200).json({ transacao: result.rows[0], message: 'Tarefa aprovada com sucesso!' });
     } finally {
       client.release();
     }
@@ -823,9 +807,224 @@ app.post('/tarefa/aprovar/:tarefaId', async (req, res) => {
   }
 });
 
-// Endpoint para buscar dados de uma criança por ID
-app.get('/filho/:filhoId', async (req, res) => {
-  console.log('Requisição recebida em /filho/:filhoId:', req.params.filhoId);
+// Endpoint para marcar tarefa como concluída
+app.post('/tarefa/marcar-concluida/:tarefaId', async (req, res) => {
+  console.log('Requisição recebida em /tarefa/marcar-concluida:', req.params.tarefaId);
+  const { tarefaId } = req.params;
+
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query('SET search_path TO banco_infantil');
+      const result = await client.query('UPDATE tarefas SET status = $1 WHERE id = $2 RETURNING id', ['concluida_pelo_filho', tarefaId]);
+      if (result.rows.length === 0) {
+        return res.status(404).json({ error: 'Tarefa não encontrada' });
+      }
+      res.status(200).json({ message: 'Tarefa marcada como concluída!' });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Erro ao marcar tarefa como concluída:', error.stack);
+    res.status(500).json({ error: 'Erro ao marcar tarefa', details: error.message });
+  }
+});
+
+// Endpoint para configurar mesada
+app.post('/mesada', async (req, res) => {
+  console.log('Requisição recebida em /mesada:', req.body);
+  const { pai_id, filho_id, valor, dia_semana } = req.body;
+
+  try {
+    if (!pai_id || !filho_id || !valor || valor <= 0 || !dia_semana) {
+      return res.status(400).json({ error: 'Dados da mesada incompletos ou inválidos' });
+    }
+
+    const diasValidos = ['domingo', 'segunda', 'terca', 'quarta', 'quinta', 'sexta', 'sabado'];
+    if (!diasValidos.includes(dia_semana)) {
+      return res.status(400).json({ error: 'Dia da semana inválido' });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SET search_path TO banco_infantil');
+
+      // Verificar se já existe mesada para a criança
+      const mesadaExistente = await client.query(
+        'SELECT id FROM mesadas WHERE pai_id = $1 AND filho_id = $2',
+        [pai_id, filho_id]
+      );
+      if (mesadaExistente.rows.length > 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Já existe uma mesada configurada para esta criança' });
+      }
+
+      // Inserir mesada
+      const result = await client.query(
+        'INSERT INTO mesadas (pai_id, filho_id, valor, dia_semana, ativo) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+        [pai_id, filho_id, valor, dia_semana, true]
+      );
+
+      await client.query('COMMIT');
+      res.status(201).json({ mesada: result.rows[0], message: 'Mesada configurada com sucesso!' });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Erro ao configurar mesada:', error.stack);
+    res.status(500).json({ error: 'Erro ao configurar mesada', details: error.message });
+  }
+});
+
+// Endpoint para atualizar mesada
+app.put('/mesada/:id', async (req, res) => {
+  console.log('Requisição recebida em /mesada/:id (PUT):', req.params.id, req.body);
+  const { id } = req.params;
+  const { pai_id, filho_id, valor, dia_semana } = req.body;
+
+  try {
+    if (!pai_id || !filho_id || !valor || valor <= 0 || !dia_semana) {
+      return res.status(400).json({ error: 'Dados da mesada incompletos ou inválidos' });
+    }
+
+    const diasValidos = ['domingo', 'segunda', 'terca', 'quarta', 'quinta', 'sexta', 'sabado'];
+    if (!diasValidos.includes(dia_semana)) {
+      return res.status(400).json({ error: 'Dia da semana inválido' });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SET search_path TO banco_infantil');
+
+      // Verificar se a mesada existe e pertence ao pai
+      const mesadaExistente = await client.query(
+        'SELECT id FROM mesadas WHERE id = $1 AND pai_id = $2 AND filho_id = $3',
+        [id, pai_id, filho_id]
+      );
+      if (mesadaExistente.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Mesada não encontrada ou não pertence ao usuário' });
+      }
+
+      // Atualizar mesada
+      const result = await client.query(
+        'UPDATE mesadas SET valor = $1, dia_semana = $2, ativo = $3 WHERE id = $4 RETURNING id',
+        [valor, dia_semana, true, id]
+      );
+
+      await client.query('COMMIT');
+      res.status(200).json({ mesada: result.rows[0], message: 'Mesada atualizada com sucesso!' });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Erro ao atualizar mesada:', error.stack);
+    res.status(500).json({ error: 'Erro ao atualizar mesada', details: error.message });
+  }
+});
+
+// Endpoint para excluir mesada
+app.delete('/mesada/:id', async (req, res) => {
+  console.log('Requisição recebida em /mesada/:id (DELETE):', req.params.id);
+  const { id } = req.params;
+
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SET search_path TO banco_infantil');
+
+      // Verificar se a mesada existe
+      const mesadaExistente = await client.query('SELECT id FROM mesadas WHERE id = $1', [id]);
+      if (mesadaExistente.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Mesada não encontrada' });
+      }
+
+      // Excluir mesada
+      await client.query('DELETE FROM mesadas WHERE id = $1', [id]);
+
+      await client.query('COMMIT');
+      res.status(200).json({ message: 'Mesada excluída com sucesso!' });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Erro ao excluir mesada:', error.stack);
+    res.status(500).json({ error: 'Erro ao excluir mesada', details: error.message });
+  }
+});
+
+// Endpoint para listar mesadas
+app.get('/mesadas/:paiId', async (req, res) => {
+  console.log('Requisição recebida em /mesadas:', req.params.paiId);
+  const { paiId } = req.params;
+
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query('SET search_path TO banco_infantil');
+      const result = await client.query(
+        'SELECT m.id, m.filho_id, m.valor::float, m.dia_semana, m.ativo, f.nome_completo FROM mesadas m JOIN filhos f ON m.filho_id = f.id WHERE m.pai_id = $1',
+        [paiId]
+      );
+      res.status(200).json({ mesadas: result.rows });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Erro ao listar mesadas:', error.stack);
+    res.status(500).json({ error: 'Erro ao listar mesadas', details: error.message });
+  }
+});
+
+// Endpoint para histórico de transações do pai
+app.get('/transacoes/historico/pai/:paiId', async (req, res) => {
+  console.log('Requisição recebida em /transacoes/historico/pai:', req.params.paiId);
+  const { paiId } = req.params;
+
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query('SET search_path TO banco_infantil');
+      const result = await client.query(
+        `SELECT t.id, t.conta_id, t.tipo, t.valor, t.descricao, t.data_criacao, t.origem, f.nome_completo
+         FROM transacoes t
+         JOIN contas c ON t.conta_id = c.id
+         LEFT JOIN filhos f ON t.descricao LIKE '%' || f.id || '%'
+         WHERE c.pai_id = $1
+         ORDER BY t.data_criacao DESC
+         LIMIT 50`,
+        [paiId]
+      );
+      res.status(200).json({
+        transacoes: result.rows.map(t => ({
+          id: t.id,
+          tipo: t.tipo,
+          valor: parseFloat(t.valor),
+          descricao: t.descricao,
+          origem: t.origem,
+          crianca_nome: t.nome_completo || 'N/A',
+          data_criacao: t.data_criacao
+        }))
+      });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Erro ao listar transações do pai:', error.stack);
+    res.status(500).json({ error: 'Erro ao listar transações', details: error.message });
+  }
+});
+
+// Endpoint para histórico de transações da criança
+app.get('/transacoes/historico/filho/:filhoId', async (req, res) => {
+  console.log('Requisição recebida em /transacoes/historico/filho:', req.params.filhoId);
   const { filhoId } = req.params;
 
   try {
@@ -833,7 +1032,45 @@ app.get('/filho/:filhoId', async (req, res) => {
     try {
       await client.query('SET search_path TO banco_infantil');
       const result = await client.query(
-        'SELECT id, nome_completo, email, icone, chave_pix, background FROM filhos WHERE id = $1',
+        `SELECT t.id, t.conta_id, t.tipo, t.valor, t.descricao, t.data_criacao, t.origem
+         FROM transacoes t
+         JOIN contas c ON t.conta_id = c.id
+         JOIN filhos f ON f.pai_id = c.pai_id
+         WHERE f.id = $1 AND t.descricao LIKE '%' || f.id || '%'
+         ORDER BY t.data_criacao DESC
+         LIMIT 50`,
+        [filhoId]
+      );
+      res.status(200).json({
+        transacoes: result.rows.map(t => ({
+          id: t.id,
+          tipo: t.tipo,
+          valor: parseFloat(t.valor),
+          descricao: t.descricao,
+          origem: t.origem,
+          data_criacao: t.data_criacao
+        }))
+      });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Erro ao listar transações da criança:', error.stack);
+    res.status(500).json({ error: 'Erro ao listar transações', details: error.message });
+  }
+});
+
+// Endpoint para dados da criança
+app.get('/filho/:filhoId', async (req, res) => {
+  console.log('Requisição recebida em /filho:', req.params.filhoId);
+  const { filhoId } = req.params;
+
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query('SET search_path TO banco_infantil');
+      const result = await client.query(
+        'SELECT id, nome_completo, email, icone, background, pai_id, chave_pix FROM filhos WHERE id = $1',
         [filhoId]
       );
       if (result.rows.length === 0) {
@@ -844,83 +1081,12 @@ app.get('/filho/:filhoId', async (req, res) => {
       client.release();
     }
   } catch (error) {
-    console.error('Erro ao buscar criança:', error.stack);
-    res.status(500).json({ error: 'Erro ao buscar criança', details: error.message });
+    console.error('Erro ao buscar dados da criança:', error.stack);
+    res.status(500).json({ error: 'Erro ao buscar dados da criança', details: error.message });
   }
 });
 
-// Endpoint para histórico de transações de tarefas do responsável
-app.get('/transacoes/tarefas/pai/:paiId', async (req, res) => {
-  console.log('Requisição recebida em /transacoes/tarefas/pai:', req.params.paiId);
-  const { paiId } = req.params;
-  try {
-    const client = await pool.connect();
-    try {
-      await client.query('SET search_path TO banco_infantil');
-      // Check if tarefas table exists
-      const tableCheck = await client.query(`
-        SELECT EXISTS (
-          SELECT FROM information_schema.tables 
-          WHERE table_schema = 'banco_infantil' AND table_name = 'tarefas'
-        )
-      `);
-      if (!tableCheck.rows[0].exists) {
-        return res.status(200).json({ total: 0 }); // Return 0 if table doesn't exist
-      }
-      const result = await client.query(`
-        SELECT COALESCE(SUM(t.valor), 0) as total
-        FROM tarefas t
-        JOIN filhos f ON t.filho_id = f.id
-        WHERE f.pai_id = $1 AND t.status = 'aprovada'
-      `, [paiId]);
-      const total = parseFloat(result.rows[0].total);
-      res.status(200).json({ total });
-    } finally {
-      client.release();
-    }
-  } catch (error) {
-    console.error('Erro ao buscar total de transações do responsável:', error.stack);
-    res.status(500).json({ error: 'Erro ao buscar total', details: error.message });
-  }
-});
-
-// Endpoint para histórico de transações de tarefas da criança
-app.get('/transacoes/tarefas/:filhoId', async (req, res) => {
-  console.log('Requisição recebida em /transacoes/tarefas:', req.params.filhoId);
-  const { filhoId } = req.params;
-  try {
-    const client = await pool.connect();
-    try {
-      await client.query('SET search_path TO banco_infantil');
-      const result = await client.query(`
-        SELECT t.id, t.descricao, t.valor, t.data_criacao as data
-        FROM tarefas t
-        WHERE t.filho_id = $1 AND t.status = 'aprovada'
-        AND t.data_criacao >= CURRENT_DATE - INTERVAL '7 days'
-      `, [filhoId]);
-      const transacoes = result.rows.map(t => {
-        const valor = parseFloat(t.valor);
-        console.log('Transação:', { id: t.id, descricao: t.descricao, valor, data: t.data });
-        return {
-          id: t.id,
-          descricao: t.descricao,
-          valor: isNaN(valor) ? 0 : valor,
-          data: t.data
-        };
-      });
-      const total = transacoes.reduce((sum, t) => sum + t.valor, 0);
-      console.log('Resposta enviada:', { transacoes, total });
-      res.status(200).json({ transacoes, total });
-    } finally {
-      client.release();
-    }
-  } catch (error) {
-    console.error('Erro ao buscar transações da criança:', error.stack);
-    res.status(200).json({ transacoes: [], total: 0 });
-  }
-});
-
-// Endpoint para monitoramento de uma criança
+// Endpoint para monitoramento
 app.get('/monitoramento/:filhoId', async (req, res) => {
   console.log('Requisição recebida em /monitoramento:', req.params.filhoId);
   const { filhoId } = req.params;
@@ -929,50 +1095,29 @@ app.get('/monitoramento/:filhoId', async (req, res) => {
     const client = await pool.connect();
     try {
       await client.query('SET search_path TO banco_infantil');
-      // Transações de tarefas aprovadas
-      const tarefasResult = await client.query(`
-        SELECT t.id, t.descricao, t.valor, t.data_criacao
-        FROM tarefas t
-        WHERE t.filho_id = $1 AND t.status = 'aprovada'
-        ORDER BY t.data_criacao DESC
-      `, [filhoId]);
+      const tarefasResult = await client.query(
+        `SELECT t.id, t.descricao, t.valor, t.data_criacao as data
+         FROM tarefas t
+         WHERE t.filho_id = $1 AND t.status = $2
+         ORDER BY t.data_criacao DESC`,
+        [filhoId, 'aprovada']
+      );
 
-      // Transações gerais (saques, transferências, uso do cartão - simuladas)
-      const transacoesResult = await client.query(`
-        SELECT t.id, t.tipo, t.valor, t.descricao, t.data_criacao
-        FROM transacoes t
-        JOIN contas_filhos cf ON t.conta_id = cf.id
-        WHERE cf.filho_id = $1
-        ORDER BY t.data_criacao DESC
-      `, [filhoId]);
-
-      // Simular saques e uso do cartão
-      const saquesSimulados = [
-        { id: 1, tipo: 'saque', valor: 50.00, data: new Date(), descricao: 'Saque em caixa eletrônico' },
-        { id: 2, tipo: 'saque', valor: 20.00, data: new Date(Date.now() - 86400000), descricao: 'Saque em caixa eletrônico' }
-      ];
-
-      const usoCartaoSimulado = [
-        { id: 1, tipo: 'debito', valor: 15.00, data: new Date(), descricao: 'Compra em loja' },
-        { id: 2, tipo: 'debito', valor: 30.00, data: new Date(Date.now() - 2 * 86400000), descricao: 'Pagamento online' }
-      ];
+      const transacoesResult = await client.query(
+        `SELECT t.id, t.tipo, t.valor, t.descricao, t.data_criacao as data
+         FROM transacoes t
+         JOIN contas c ON t.conta_id = c.id
+         JOIN filhos f ON f.pai_id = c.pai_id
+         WHERE f.id = $1 AND t.descricao LIKE '%' || f.id || '%'
+         ORDER BY t.data_criacao DESC`,
+        [filhoId]
+      );
 
       res.status(200).json({
-        tarefas: tarefasResult.rows.map(tarefa => ({
-          id: tarefa.id,
-          descricao: tarefa.descricao,
-          valor: parseFloat(tarefa.valor),
-          data: tarefa.data_criacao
-        })),
-        transacoes: transacoesResult.rows.map(transacao => ({
-          id: transacao.id,
-          tipo: transacao.tipo,
-          valor: parseFloat(transacao.valor),
-          descricao: transacao.descricao,
-          data: transacao.data_criacao
-        })),
-        saques: saquesSimulados,
-        uso_cartao: usoCartaoSimulado
+        tarefas: tarefasResult.rows.map(t => ({ ...t, valor: parseFloat(t.valor) })),
+        transacoes: transacoesResult.rows.map(t => ({ ...t, valor: parseFloat(t.valor) })),
+        saques: [],
+        uso_cartao: []
       });
     } finally {
       client.release();
@@ -983,100 +1128,69 @@ app.get('/monitoramento/:filhoId', async (req, res) => {
   }
 });
 
-// *** ENDPOINTS PARA ATUALIZAÇÃO DINÂMICA ***
+// Endpoint para transações de tarefas
+app.get('/transacoes/tarefas/:filhoId', async (req, res) => {
+  console.log('Requisição recebida em /transacoes/tarefas:', req.params.filhoId);
+  const { filhoId } = req.params;
 
-const UPDATE_DIR = path.join(__dirname, 'updates');
-const ZIP_PATH = path.join(UPDATE_DIR, 'frontend.zip');
-const VERSION_PATH = path.join(UPDATE_DIR, 'version.json');
-
-(async () => {
   try {
-    if (!fs.existsSync(UPDATE_DIR)) {
-      await fsPromises.mkdir(UPDATE_DIR);
-    }
-    if (!fs.existsSync(VERSION_PATH)) {
-      await fsPromises.writeFile(VERSION_PATH, JSON.stringify({ version: '1.0.0' }));
-    }
-  } catch (error) {
-    console.error('Erro ao inicializar diretório de atualizações:', error.stack);
-  }
-})();
-
-async function calculateZipHash() {
-  try {
-    const fileBuffer = await fsPromises.readFile(ZIP_PATH);
-    return crypto.createHash('sha256').update(fileBuffer).digest('hex');
-  } catch (err) {
-    return null;
-  }
-}
-
-app.get('/update/check', async (req, res) => {
-  try {
-    const versionData = JSON.parse(await fsPromises.readFile(VERSION_PATH));
-    const zipHash = await calculateZipHash();
-    if (!zipHash) {
-      return res.status(404).json({ error: 'Arquivo de atualização não encontrado' });
-    }
-    res.json({
-      version: versionData.version,
-      zipHash,
-      zipUrl: '/update/download'
-    });
-  } catch (error) {
-    console.error('Erro ao verificar atualizações:', error.stack);
-    res.status(500).json({ error: 'Erro ao verificar atualizações' });
-  }
-});
-
-app.get('/update/download', async (req, res) => {
-  try {
-    if (!fs.existsSync(ZIP_PATH)) {
-      return res.status(404).json({ error: 'Arquivo de atualização não encontrado' });
-    }
-    res.download(ZIP_PATH, 'frontend.zip');
-  } catch (error) {
-    console.error('Erro ao baixar atualização:', error.stack);
-    res.status(500).json({ error: 'Erro ao baixar atualização' });
-  }
-});
-
-async function createFrontendZip() {
-  try {
-    const zip = new AdmZip();
-    const frontendDir = path.join(__dirname, 'frontend_build');
-    if (!fs.existsSync(frontendDir)) {
-      console.error('Pasta frontend_build não encontrada');
-      return;
-    }
-    zip.addLocalFolder(frontendDir);
-    await new Promise((resolve, reject) => {
-      zip.writeZip(ZIP_PATH, (err) => {
-        if (err) reject(err);
-        else resolve();
+    const client = await pool.connect();
+    try {
+      await client.query('SET search_path TO banco_infantil');
+      const result = await client.query(
+        `SELECT t.id, t.descricao, t.valor, t.data_criacao as data
+         FROM transacoes t
+         JOIN contas c ON t.conta_id = c.id
+         JOIN filhos f ON f.pai_id = c.pai_id
+         WHERE f.id = $1 AND t.origem = $2
+         ORDER BY t.data_criacao DESC
+         LIMIT 7`,
+        [filhoId, 'tarefa']
+      );
+      const total = result.rows.reduce((sum, t) => sum + parseFloat(t.valor), 0);
+      res.status(200).json({
+        transacoes: result.rows.map(t => ({ ...t, valor: parseFloat(t.valor) })),
+        total
       });
-    });
-    console.log('frontend.zip criado com sucesso');
+    } finally {
+      client.release();
+    }
   } catch (error) {
-    console.error('Erro ao criar frontend.zip:', error.stack);
+    console.error('Erro ao listar transações de tarefas:', error.stack);
+    res.status(500).json({ error: 'Erro ao listar transações', details: error.message });
   }
-}
+});
 
-createFrontendZip();
+// Endpoint para total de tarefas do pai
+app.get('/transacoes/tarefas/pai/:paiId', async (req, res) => {
+  console.log('Requisição recebida em /transacoes/tarefas/pai:', req.params.paiId);
+  const { paiId } = req.params;
 
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query('SET search_path TO banco_infantil');
+      const result = await client.query(
+        `SELECT COALESCE(SUM(t.valor), 0) as total
+         FROM transacoes t
+         JOIN contas c ON t.conta_id = c.id
+         WHERE c.pai_id = $1 AND t.origem = $2`,
+        [paiId, 'tarefa']
+      );
+      res.status(200).json({ total: parseFloat(result.rows[0].total) });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Erro ao calcular total de tarefas:', error.stack);
+    res.status(500).json({ error: 'Erro ao calcular total', details: error.message });
+  }
+});
+
+// Iniciar servidor e agendador
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, '0.0.0.0', (err) => {
-  if (err) {
-    console.error('Erro ao iniciar o servidor:', err.stack);
-    process.exit(1);
-  }
-  console.log(`Backend rodando em http://localhost:${PORT}`);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Erro não tratado na promessa:', promise, 'razão:', reason);
-});
-
-process.on('uncaughtException', (err) => {
-  console.error('Erro não capturado:', err.stack);
+app.listen(PORT, () => {
+  console.log(`Servidor rodando na porta ${PORT}`);
+  // Iniciar tarefas diárias (desafios automáticos e mesadas)
+  executarTarefasDiarias(pool);
 });
