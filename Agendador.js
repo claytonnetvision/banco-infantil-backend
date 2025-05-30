@@ -1,3 +1,4 @@
+// backend/Agendador.js
 const cron = require('node-cron');
 const axios = require('axios');
 
@@ -115,11 +116,79 @@ async function processarMesadas(pool, retries = 3) {
   }
 }
 
+async function processarTarefasAutomaticas(pool, retries = 3) {
+  console.log('Iniciando processamento de tarefas automáticas...');
+  let client;
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      client = await pool.connect();
+      await client.query('SET search_path TO banco_infantil');
+
+      const hoje = new Date().toLocaleString('pt-BR', { weekday: 'long' }).toLowerCase();
+      const tarefasAutomaticasResult = await client.query(
+        `SELECT ta.id, ta.pai_id, ta.filho_id, ta.descricao, ta.valor, c.saldo, c.id as conta_id
+         FROM tarefas_automaticas ta
+         JOIN contas c ON ta.pai_id = c.pai_id
+         WHERE ta.ativo = true
+         AND $1 = ANY(ta.dias_semana)
+         AND CURRENT_DATE BETWEEN ta.data_inicio AND ta.data_fim`,
+        [hoje]
+      );
+
+      for (const tarefa of tarefasAutomaticasResult.rows) {
+        const { id, pai_id, filho_id, descricao, valor, saldo, conta_id } = tarefa;
+        try {
+          // Verificar saldo do responsável
+          if (saldo < valor) {
+            console.log(`Saldo insuficiente para tarefa automática ${id} do filho ${filho_id}`);
+            continue;
+          }
+
+          // Verificar se a tarefa já foi criada hoje
+          const tarefaExistente = await client.query(
+            'SELECT id FROM tarefas WHERE filho_id = $1 AND descricao = $2 AND DATE(data_criacao) = CURRENT_DATE',
+            [filho_id, descricao]
+          );
+          if (tarefaExistente.rows.length > 0) {
+            console.log(`Tarefa automática ${id} já criada hoje para filho ${filho_id}`);
+            continue;
+          }
+
+          // Criar tarefa
+          await client.query(
+            'INSERT INTO tarefas (filho_id, descricao, valor, status) VALUES ($1, $2, $3, $4)',
+            [filho_id, descricao, valor, 'pendente']
+          );
+
+          // Adicionar notificação
+          await client.query(
+            'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
+            [filho_id, `Nova tarefa automática: ${descricao} por R$ ${valor.toFixed(2)}!`, new Date()]
+          );
+
+          console.log(`Tarefa automática ${id} criada para filho ${filho_id}`);
+        } catch (error) {
+          console.error(`Erro ao processar tarefa automática ${id} para filho ${filho_id}:`, error.message);
+        }
+      }
+      return;
+    } catch (error) {
+      console.error(`Tentativa ${attempt} falhou ao processar tarefas automáticas:`, error);
+      if (attempt === retries) {
+        console.error('Erro final ao processar tarefas automáticas:', error);
+      }
+      if (client) client.release();
+      await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+    }
+  }
+}
+
 function executarTarefasDiarias(pool) {
   cron.schedule('1 0 * * *', async () => {
     console.log('Executando tarefas diárias...');
     await criarDesafiosAutomaticos(pool);
     await processarMesadas(pool);
+    await processarTarefasAutomaticas(pool);
   }, {
     timezone: 'America/Sao_Paulo'
   });

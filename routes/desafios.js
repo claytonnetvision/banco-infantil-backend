@@ -1,3 +1,4 @@
+// backend/routes/desafios.js
 const express = require('express');
 const router = express.Router();
 const { Pool } = require('pg');
@@ -14,9 +15,9 @@ const pool = new Pool({
   database: process.env.DB_DATABASE,
   password: process.env.DB_PASSWORD,
   port: parseInt(process.env.DB_PORT),
-  max: 10, // Aumentado de 5 para 10
-  idleTimeoutMillis: 30000, // Aumentado de 10000 para 30000
-  connectionTimeoutMillis: 20000, // Aumentado de 15000 para 20000
+  max: 10,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 20000,
   ssl: {
     require: true,
     rejectUnauthorized: false
@@ -40,32 +41,38 @@ async function getRandomPerguntas(filho_id, tipo, quantidade, perguntasEstaticas
     client = await pool.connect();
     await client.query('SET search_path TO banco_infantil');
 
-    // Buscar perguntas já usadas
+    // Buscar perguntas já usadas para o filho e tipo
     const usadasResult = await client.query(
       'SELECT pergunta_id FROM perguntas_usadas WHERE filho_id = $1 AND tipo = $2',
       [filho_id, tipo]
     );
     const usadas = usadasResult.rows.map(row => row.pergunta_id);
 
-    // Filtrar perguntas não usadas
+    // Filtrar perguntas disponíveis
     let disponiveis = perguntasEstaticas.filter(p => !usadas.includes(p.id));
     
-    // Se não houver disponíveis, reiniciar o ciclo
+    // Verificar se todas as perguntas foram usadas
     if (disponiveis.length < quantidade) {
-      await client.query(
-        'DELETE FROM perguntas_usadas WHERE filho_id = $1 AND tipo = $2',
-        [filho_id, tipo]
-      );
-      disponiveis = [...perguntasEstaticas];
+      // Contar total de perguntas disponíveis
+      if (usadas.length >= perguntasEstaticas.length) {
+        await client.query(
+          'DELETE FROM perguntas_usadas WHERE filho_id = $1 AND tipo = $2',
+          [filho_id, tipo]
+        );
+        disponiveis = [...perguntasEstaticas];
+      } else {
+        // Se ainda há perguntas disponíveis, mas não o suficiente, lançar erro
+        throw new Error(`Não há perguntas suficientes disponíveis para ${tipo}. Disponíveis: ${disponiveis.length}, Requeridas: ${quantidade}`);
+      }
     }
 
     // Embaralhar e selecionar
     const selecionadas = shuffleArray(disponiveis).slice(0, quantidade);
 
-    // Registrar perguntas usadas
+    // Registrar perguntas usadas apenas para o novo conjunto
     for (const pergunta of selecionadas) {
       await client.query(
-        'INSERT INTO perguntas_usadas (filho_id, tipo, pergunta_id) VALUES ($1, $2, $3)',
+        'INSERT INTO perguntas_usadas (filho_id, tipo, pergunta_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
         [filho_id, tipo, pergunta.id]
       );
     }
@@ -428,15 +435,16 @@ router.post('/conjunto/:conjunto_id/responder', async (req, res) => {
     }
 
     // Verificar se a pergunta já foi respondida
-    const respostaExistente = await client.query(
-      'SELECT id FROM respostas_desafios WHERE conjunto_id = $1 AND crianca_id = $2 AND pergunta_id = $3',
-      [conjunto_id, filho_id, pergunta_id]
-    );
-    if (respostaExistente.rows.length > 0) {
-      await client.query('ROLLBACK');
-      console.log('Pergunta já respondida:', { conjunto_id, filho_id, pergunta_id });
-      return res.status(400).json({ error: 'Pergunta já respondida' });
-    }
+    // Verificar se a pergunta já foi respondida neste conjunto específico
+const respostaExistente = await client.query(
+  'SELECT id FROM respostas_desafios WHERE conjunto_id = $1 AND crianca_id = $2 AND pergunta_id = $3',
+  [conjunto_id, filho_id, pergunta_id]
+);
+if (respostaExistente.rows.length > 0) {
+  await client.query('ROLLBACK');
+  console.log('Pergunta já respondida neste conjunto:', { conjunto_id, filho_id, pergunta_id });
+  return res.status(400).json({ error: 'Pergunta já respondida neste conjunto' });
+}
 
     // Avaliar a resposta
     const correta = parseInt(resposta) === parseInt(pergunta.resposta_correta);
@@ -582,6 +590,113 @@ router.get('/historico/crianca/:filho_id', async (req, res) => {
   } catch (error) {
     console.error('Erro ao listar histórico da criança:', error.stack);
     res.status(500).json({ error: 'Erro ao listar histórico', details: error.message });
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+});
+
+// Novo endpoint para histórico completo (conjuntos e matemáticos)
+router.get('/historico/completo/:id', async (req, res) => {
+  console.log('Requisição recebida em /desafios/historico/completo/:id:', req.params.id);
+  const { id } = req.params;
+  const { tipo } = req.query; // 'pai' ou 'filho'
+
+  let client;
+  try {
+    if (!tipo || !['pai', 'filho'].includes(tipo)) {
+      return res.status(400).json({ error: 'Tipo (pai ou filho) é obrigatório' });
+    }
+
+    client = await pool.connect();
+    await client.query('SET search_path TO banco_infantil');
+
+    let conjuntosQuery, matematicaQuery;
+
+    if (tipo === 'pai') {
+      // Histórico de conjuntos para o pai
+      conjuntosQuery = `
+        SELECT cd.id, cd.tipos, cd.valor_recompensa, cd.criado_em, f.nome_completo as crianca_nome,
+               (SELECT COUNT(*) FROM respostas_desafios rd WHERE rd.conjunto_id = cd.id AND rd.correta) as acertos,
+               cd.automatico, 'conjunto' as tipo_desafio
+        FROM conjuntos_desafios cd
+        JOIN filhos f ON cd.filho_id = f.id
+        WHERE cd.pai_id = $1
+        ORDER BY cd.criado_em DESC
+        LIMIT 3
+      `;
+      // Histórico de desafios matemáticos para o pai
+      matematicaQuery = `
+        SELECT dm.id, dm.filho_id, dm.pergunta, dm.resposta_correta, dm.valor, dm.status, dm.data_criacao, f.nome_completo as crianca_nome,
+               'matematica' as tipo_desafio
+        FROM desafios_matematicos dm
+        JOIN filhos f ON dm.filho_id = f.id
+        WHERE f.pai_id = $1
+        ORDER BY dm.data_criacao DESC
+        LIMIT 3
+      `;
+    } else {
+      // Histórico de conjuntos para a criança
+      conjuntosQuery = `
+        SELECT cd.id, cd.tipos, cd.valor_recompensa, cd.criado_em, f.nome_completo as crianca_nome,
+               (SELECT COUNT(*) FROM respostas_desafios rd WHERE rd.conjunto_id = cd.id AND rd.correta) as acertos,
+               cd.automatico, 'conjunto' as tipo_desafio
+        FROM conjuntos_desafios cd
+        JOIN filhos f ON cd.filho_id = f.id
+        WHERE cd.filho_id = $1
+        ORDER BY cd.criado_em DESC
+        LIMIT 3
+      `;
+      // Histórico de desafios matemáticos para a criança
+      matematicaQuery = `
+        SELECT dm.id, dm.filho_id, dm.pergunta, dm.resposta_correta, dm.valor, dm.status, dm.data_criacao, f.nome_completo as crianca_nome,
+               'matematica' as tipo_desafio
+        FROM desafios_matematicos dm
+        JOIN filhos f ON dm.filho_id = f.id
+        WHERE dm.filho_id = $1
+        ORDER BY dm.data_criacao DESC
+        LIMIT 3
+      `;
+    }
+
+    const [conjuntosResult, matematicaResult] = await Promise.all([
+      client.query(conjuntosQuery, [id]),
+      client.query(matematicaQuery, [id])
+    ]);
+
+    const conjuntos = conjuntosResult.rows.map(row => ({
+      id: row.id,
+      tipo_desafio: row.tipo_desafio,
+      tipos: row.tipos ? Object.keys(row.tipos).filter(k => row.tipos[k] > 0) : [],
+      valor_recompensa: parseFloat(row.valor_recompensa || 0),
+      crianca_nome: row.crianca_nome,
+      acertos: parseInt(row.acertos || 0),
+      total_perguntas: row.tipos ? Object.values(row.tipos).reduce((a, b) => a + b, 0) : 0,
+      data_criacao: row.criado_em,
+      automatico: row.automatico || false
+    }));
+
+    const matematica = matematicaResult.rows.map(row => ({
+      id: row.id,
+      tipo_desafio: row.tipo_desafio,
+      pergunta: row.pergunta,
+      resposta_correta: parseFloat(row.resposta_correta),
+      valor_recompensa: parseFloat(row.valor || 0),
+      crianca_nome: row.crianca_nome,
+      status: row.status,
+      data_criacao: row.data_criacao
+    }));
+
+    // Combinar e ordenar por data_criacao (mais recente primeiro), limitando a 3
+    const historico = [...conjuntos, ...matematica]
+      .sort((a, b) => new Date(b.data_criacao) - new Date(a.data_criacao))
+      .slice(0, 3);
+
+    res.status(200).json({ historico });
+  } catch (error) {
+    console.error('Erro ao buscar histórico completo:', error.stack);
+    res.status(500).json({ error: 'Erro ao buscar histórico completo', details: error.message });
   } finally {
     if (client) {
       client.release();

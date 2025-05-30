@@ -783,7 +783,7 @@ app.post('/tarefa', async (req, res) => {
   }
 });
 
-// Endpoint para listar tarefas
+// Endpoint para listar tarefas da criança
 app.get('/tarefas/:filhoId', async (req, res) => {
   console.log('Requisição recebida em /tarefas:', req.params.filhoId);
   const { filhoId } = req.params;
@@ -792,7 +792,10 @@ app.get('/tarefas/:filhoId', async (req, res) => {
     const client = await pool.connect();
     try {
       await client.query('SET search_path TO banco_infantil');
-      const result = await client.query('SELECT id, descricao, status, valor FROM tarefas WHERE filho_id = $1', [filhoId]);
+      const result = await client.query(
+        'SELECT id, descricao, status, valor FROM tarefas WHERE filho_id = $1 AND DATE(data_criacao) = CURRENT_DATE',
+        [filhoId]
+      );
       res.status(200).json({
         tarefas: result.rows.map(tarefa => ({
           ...tarefa,
@@ -821,7 +824,7 @@ app.get('/tarefas/filhos/:paiId', async (req, res) => {
         SELECT t.id, t.filho_id, t.descricao, t.valor, t.status, f.nome_completo
         FROM tarefas t
         JOIN filhos f ON t.filho_id = f.id
-        WHERE f.pai_id = $1
+        WHERE f.pai_id = $1 AND DATE(t.data_criacao) = CURRENT_DATE
         ORDER BY t.status, t.data_criacao DESC
       `, [paiId]);
 
@@ -1129,17 +1132,17 @@ app.get('/mesadas/:paiId', async (req, res) => {
         [paiId]
       );
       console.log('Mesadas encontradas:', result.rows);
-      res.status(200).json({ mesadas: result.rows }); // Always return { mesadas: [...] }
+      res.status(200).json({ mesadas: result.rows });
     } finally {
       client.release();
     }
   } catch (error) {
     console.error('Erro ao listar mesadas:', error.stack);
-    res.status(500).json({ error: 'Erro ao listar mesadas', details: error.message, mesadas: [] }); // Fallback to empty array
+    res.status(500).json({ error: 'Erro ao listar mesadas', details: error.message, mesadas: [] });
   }
 });
 
-// Novo endpoint para consultar mesada da criança
+// Endpoint para consultar mesada da criança
 app.get('/mesada/filho/:filhoId', async (req, res) => {
   console.log('Requisição recebida em /mesada/filho:', req.params.filhoId);
   const { filhoId } = req.params;
@@ -1364,6 +1367,243 @@ app.get('/transacoes/tarefas/pai/:paiId', async (req, res) => {
   } catch (error) {
     console.error('Erro ao calcular total de tarefas:', error.stack);
     res.status(500).json({ error: 'Erro ao calcular total', details: error.message });
+  }
+});
+
+// Endpoint para criar tarefa automática
+app.post('/tarefas-automaticas', async (req, res) => {
+  console.log('Requisição recebida em /tarefas-automaticas:', req.body);
+  const { pai_id, filho_id, descricao, valor, dias_semana, data_inicio, data_fim } = req.body;
+
+  try {
+    if (!pai_id || !filho_id || !descricao || !valor || valor <= 0 || !dias_semana || !data_inicio || !data_fim) {
+      console.log('Dados da tarefa automática incompletos');
+      return res.status(400).json({ error: 'Dados da tarefa automática incompletos' });
+    }
+
+    const diasValidos = ['domingo', 'segunda', 'terca', 'quarta', 'quinta', 'sexta', 'sabado'];
+    if (!Array.isArray(dias_semana) || !dias_semana.every(dia => diasValidos.includes(dia))) {
+      console.log('Dias da semana inválidos:', dias_semana);
+      return res.status(400).json({ error: 'Dias da semana inválidos' });
+    }
+
+    const dataInicio = new Date(data_inicio);
+    const dataFim = new Date(data_fim);
+    if (isNaN(dataInicio) || isNaN(dataFim) || dataInicio > dataFim || dataFim > new Date(dataInicio.setDate(dataInicio.getDate() + 7))) {
+      console.log('Datas inválidas:', { data_inicio, data_fim });
+      return res.status(400).json({ error: 'Datas inválidas. O período deve ser de até 7 dias a partir da data de início.' });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SET search_path TO banco_infantil');
+
+      // Verificar se pai e filho existem
+      const paiExists = await client.query('SELECT id FROM pais WHERE id = $1', [pai_id]);
+      if (paiExists.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Responsável não encontrado' });
+      }
+
+      const filhoExists = await client.query('SELECT id FROM filhos WHERE id = $1 AND pai_id = $2', [filho_id, pai_id]);
+      if (filhoExists.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Criança não encontrada ou não pertence ao responsável' });
+      }
+
+      // Inserir tarefa automática
+      const result = await client.query(
+        'INSERT INTO tarefas_automaticas (pai_id, filho_id, descricao, valor, dias_semana, data_inicio, data_fim, ativo) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id',
+        [pai_id, filho_id, descricao, valor, dias_semana, data_inicio, data_fim, true]
+      );
+
+      await client.query('COMMIT');
+      res.status(201).json({ tarefa_automatica: result.rows[0], message: 'Tarefa automática configurada com sucesso!' });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Erro ao configurar tarefa automática:', error.stack);
+    res.status(500).json({ error: 'Erro ao configurar tarefa automática', details: error.message });
+  }
+});
+
+// Endpoint para listar tarefas automáticas
+app.get('/tarefas-automaticas/listar/:paiId', async (req, res) => {
+  console.log('Requisição recebida em /tarefas-automaticas/listar:', req.params.paiId);
+  const { paiId } = req.params;
+
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query('SET search_path TO banco_infantil');
+      const result = await client.query(
+        `SELECT ta.id, ta.filho_id, ta.descricao, ta.valor::float, ta.dias_semana, ta.data_inicio, ta.data_fim, ta.ativo, f.nome_completo
+         FROM tarefas_automaticas ta
+         JOIN filhos f ON ta.filho_id = f.id
+         WHERE ta.pai_id = $1
+         ORDER BY ta.criado_em DESC`,
+        [paiId]
+      );
+      console.log('Tarefas automáticas encontradas:', result.rows);
+      res.status(200).json({ tarefas_automaticas: result.rows });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Erro ao listar tarefas automáticas:', error.stack);
+    res.status(500).json({ error: 'Erro ao listar tarefas automáticas', details: error.message });
+  }
+});
+
+// Endpoint para atualizar tarefa automática
+app.put('/tarefas-automaticas/:id', async (req, res) => {
+  console.log('Requisição recebida em /tarefas-automaticas/:id (PUT):', req.params.id, req.body);
+  const { id } = req.params;
+  const { pai_id, filho_id, descricao, valor, dias_semana, data_inicio, data_fim } = req.body;
+
+  try {
+    if (!pai_id || !filho_id || !descricao || !valor || valor <= 0 || !dias_semana || !data_inicio || !data_fim) {
+      console.log('Dados da tarefa automática incompletos');
+      return res.status(400).json({ error: 'Dados da tarefa automática incompletos' });
+    }
+
+    const diasValidos = ['domingo', 'segunda', 'terca', 'quarta', 'quinta', 'sexta', 'sabado'];
+    if (!Array.isArray(dias_semana) || !dias_semana.every(dia => diasValidos.includes(dia))) {
+      console.log('Dias da semana inválidos:', dias_semana);
+      return res.status(400).json({ error: 'Dias da semana inválidos' });
+    }
+
+    const dataInicio = new Date(data_inicio);
+    const dataFim = new Date(data_fim);
+    if (isNaN(dataInicio) || isNaN(dataFim) || dataInicio > dataFim || dataFim > new Date(dataInicio.setDate(dataInicio.getDate() + 7))) {
+      console.log('Datas inválidas:', { data_inicio, data_fim });
+      return res.status(400).json({ error: 'Datas inválidas. O período deve ser de até 7 dias a partir da data de início.' });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SET search_path TO banco_infantil');
+
+      // Verificar se a tarefa automática existe
+      const tarefaExistente = await client.query(
+        'SELECT id FROM tarefas_automaticas WHERE id = $1 AND pai_id = $2 AND filho_id = $3',
+        [id, pai_id, filho_id]
+      );
+      if (tarefaExistente.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Tarefa automática não encontrada ou não pertence ao usuário' });
+      }
+
+      // Atualizar tarefa automática
+      const result = await client.query(
+        'UPDATE tarefas_automaticas SET descricao = $1, valor = $2, dias_semana = $3, data_inicio = $4, data_fim = $5, ativo = $6 WHERE id = $7 RETURNING id',
+        [descricao, valor, dias_semana, data_inicio, data_fim, true, id]
+      );
+
+      await client.query('COMMIT');
+      res.status(200).json({ tarefa_automatica: result.rows[0], message: 'Tarefa automática atualizada com sucesso!' });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Erro ao atualizar tarefa automática:', error.stack);
+    res.status(500).json({ error: 'Erro ao atualizar tarefa automática', details: error.message });
+  }
+});
+
+// Endpoint para excluir tarefa automática
+app.delete('/tarefas-automaticas/:id', async (req, res) => {
+  console.log('Requisição recebida em /tarefas-automaticas/:id (DELETE):', req.params.id);
+  const { id } = req.params;
+
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SET search_path TO banco_infantil');
+
+      // Verificar se a tarefa automática existe
+      const tarefaExistente = await client.query('SELECT id, filho_id FROM tarefas_automaticas WHERE id = $1', [id]);
+      if (tarefaExistente.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Tarefa automática não encontrada' });
+      }
+
+      const filhoId = tarefaExistente.rows[0].filho_id;
+
+      // Excluir tarefa automática
+      await client.query('DELETE FROM tarefas_automaticas WHERE id = $1', [id]);
+
+      // Adicionar notificação para a criança
+      await client.query(
+        'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
+        [filhoId, 'Uma tarefa automática foi cancelada pelo responsável.', new Date()]
+      );
+
+      await client.query('COMMIT');
+      res.status(200).json({ message: 'Tarefa automática excluída com sucesso!' });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Erro ao excluir tarefa automática:', error.stack);
+    res.status(500).json({ error: 'Erro ao excluir tarefa automática', details: error.message });
+  }
+});
+
+// Endpoint para ativar/desativar tarefa automática
+app.put('/tarefas-automaticas/:id/ativar', async (req, res) => {
+  console.log('Requisição recebida em /tarefas-automaticas/:id/ativar:', req.params.id, req.body);
+  const { id } = req.params;
+  const { ativo } = req.body;
+
+  try {
+    if (typeof ativo !== 'boolean') {
+      console.log('Estado ativo inválido:', ativo);
+      return res.status(400).json({ error: 'Estado ativo deve ser um booleano' });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SET search_path TO banco_infantil');
+
+      // Verificar se a tarefa automática existe
+      const tarefaExistente = await client.query('SELECT id, filho_id FROM tarefas_automaticas WHERE id = $1', [id]);
+      if (tarefaExistente.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Tarefa automática não encontrada' });
+      }
+
+      const filhoId = tarefaExistente.rows[0].filho_id;
+
+      // Atualizar estado
+      const result = await client.query(
+        'UPDATE tarefas_automaticas SET ativo = $1 WHERE id = $2 RETURNING id',
+        [ativo, id]
+      );
+
+      // Adicionar notificação para a criança
+      await client.query(
+        'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
+        [filhoId, `Uma tarefa automática foi ${ativo ? 'ativada' : 'desativada'} pelo responsável.`, new Date()]
+      );
+
+      await client.query('COMMIT');
+      res.status(200).json({ tarefa_automatica: result.rows[0], message: `Tarefa automática ${ativo ? 'ativada' : 'desativada'} com sucesso!` });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Erro ao ativar/desativar tarefa automática:', error.stack);
+    res.status(500).json({ error: 'Erro ao ativar/desativar tarefa automática', details: error.message });
   }
 });
 
