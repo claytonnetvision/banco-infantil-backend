@@ -1,3 +1,4 @@
+// backend/index.js
 require('dotenv').config();
 const express = require('express');
 const { Pool } = require('pg');
@@ -172,7 +173,7 @@ app.post('/perfil/background', upload.single('background'), handleMulterError, a
   }
 });
 
-// Endpoint de cadastro (pai e criança)
+// Endpoint para cadastro (pai e criança)
 app.post('/cadastro', async (req, res) => {
   console.log('Requisição recebida em /cadastro:', req.body);
   const { pai, filho } = req.body;
@@ -840,16 +841,12 @@ app.get('/tarefas/filhos/:paiId', async (req, res) => {
 });
 
 // Endpoint para aprovar tarefa
-// Endpoint para aprovar tarefa
-// Endpoint para aprovar tarefa
-// Endpoint para aprovar tarefa
-// Endpoint para aprovar tarefa
 app.post('/tarefa/aprovar/:tarefaId', async (req, res) => {
   console.log('Requisição recebida em /tarefa/aprovar:', req.params.tarefaId);
   const { tarefaId } = req.params;
   const { pai_id, filho_id } = req.body;
 
-  let client = null; // Declarar client no início
+  let client = null;
   try {
     if (!pai_id || !filho_id) {
       console.log('ID do responsável e da criança são obrigatórios');
@@ -1119,7 +1116,6 @@ app.delete('/mesada/:id', async (req, res) => {
 });
 
 // Endpoint para listar mesadas
-// Endpoint para listar mesadas
 app.get('/mesadas/:paiId', async (req, res) => {
   console.log('Requisição recebida em /mesadas:', req.params.paiId);
   const { paiId } = req.params;
@@ -1368,6 +1364,49 @@ app.get('/transacoes/tarefas/pai/:paiId', async (req, res) => {
   } catch (error) {
     console.error('Erro ao calcular total de tarefas:', error.stack);
     res.status(500).json({ error: 'Erro ao calcular total', details: error.message });
+  }
+});
+
+// Novo endpoint para trocar senha
+app.post('/alterar-senha', async (req, res) => {
+  console.log('Requisição recebida em /alterar-senha:', req.body);
+  const { email, novaSenha, tipo } = req.body;
+
+  try {
+    if (!email || !novaSenha || !tipo || !['pai', 'filho'].includes(tipo)) {
+      console.log('Dados inválidos:', { email, novaSenha, tipo });
+      return res.status(400).json({ error: 'Email, nova senha e tipo (pai ou filho) são obrigatórios' });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('SET search_path TO banco_infantil');
+
+      let result;
+      if (tipo === 'pai') {
+        result = await client.query(
+          'UPDATE pais SET senha = $1 WHERE email = $2 RETURNING id',
+          [novaSenha, email]
+        );
+      } else {
+        result = await client.query(
+          'UPDATE filhos SET senha = $1 WHERE email = $2 RETURNING id',
+          [novaSenha, email]
+        );
+      }
+
+      if (result.rows.length === 0) {
+        console.log('Usuário não encontrado:', { email, tipo });
+        return res.status(404).json({ error: 'Usuário não encontrado' });
+      }
+
+      res.status(200).json({ message: 'Senha alterada com sucesso' });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Erro ao alterar senha:', error.stack);
+    res.status(500).json({ error: 'Erro ao alterar senha', details: error.message });
   }
 });
 
