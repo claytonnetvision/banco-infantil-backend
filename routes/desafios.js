@@ -34,48 +34,25 @@ function shuffleArray(array) {
   return shuffled;
 }
 
-// Função para selecionar perguntas aleatórias sem repetição
+// Função para selecionar perguntas aleatórias
 async function getRandomPerguntas(filho_id, tipo, quantidade, perguntasEstaticas) {
   let client;
   try {
     client = await pool.connect();
     await client.query('SET search_path TO banco_infantil');
 
-    // Buscar perguntas já usadas para o filho e tipo
-    const usadasResult = await client.query(
-      'SELECT pergunta_id FROM perguntas_usadas WHERE filho_id = $1 AND tipo = $2',
-      [filho_id, tipo]
-    );
-    const usadas = usadasResult.rows.map(row => row.pergunta_id);
+    // Selecionar todas as perguntas disponíveis
+    let disponiveis = [...perguntasEstaticas];
+    console.log(`Perguntas disponíveis (${tipo}) para filho ${filho_id}:`, disponiveis.length);
 
-    // Filtrar perguntas disponíveis
-    let disponiveis = perguntasEstaticas.filter(p => !usadas.includes(p.id));
-    
-    // Verificar se todas as perguntas foram usadas
+    // Verificar se há perguntas suficientes
     if (disponiveis.length < quantidade) {
-      // Contar total de perguntas disponíveis
-      if (usadas.length >= perguntasEstaticas.length) {
-        await client.query(
-          'DELETE FROM perguntas_usadas WHERE filho_id = $1 AND tipo = $2',
-          [filho_id, tipo]
-        );
-        disponiveis = [...perguntasEstaticas];
-      } else {
-        // Se ainda há perguntas disponíveis, mas não o suficiente, lançar erro
-        throw new Error(`Não há perguntas suficientes disponíveis para ${tipo}. Disponíveis: ${disponiveis.length}, Requeridas: ${quantidade}`);
-      }
+      throw new Error(`Não há perguntas suficientes disponíveis para ${tipo}. Disponíveis: ${disponiveis.length}, Requeridas: ${quantidade}`);
     }
 
     // Embaralhar e selecionar
     const selecionadas = shuffleArray(disponiveis).slice(0, quantidade);
-
-    // Registrar perguntas usadas apenas para o novo conjunto
-    for (const pergunta of selecionadas) {
-      await client.query(
-        'INSERT INTO perguntas_usadas (filho_id, tipo, pergunta_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
-        [filho_id, tipo, pergunta.id]
-      );
-    }
+    console.log(`Perguntas selecionadas (${tipo}):`, selecionadas.map(p => p.id));
 
     return selecionadas;
   } catch (error) {
@@ -149,7 +126,6 @@ router.post('/conjunto', async (req, res) => {
     // Gerar perguntas
     console.log('Gerando perguntas...');
     const perguntas = [];
-    let idCounter = 1;
 
     if (tipo_desafios.educacao_financeira > 0) {
       const perguntasFinanceira = await getRandomPerguntas(
@@ -160,7 +136,7 @@ router.post('/conjunto', async (req, res) => {
       );
       perguntasFinanceira.forEach(pergunta => {
         perguntas.push({
-          id: idCounter++,
+          id: String(pergunta.id),
           tipo: 'educacao_financeira',
           pergunta: pergunta.pergunta,
           opcoes: pergunta.opcoes,
@@ -179,7 +155,7 @@ router.post('/conjunto', async (req, res) => {
       );
       perguntasOrtografia.forEach(pergunta => {
         perguntas.push({
-          id: idCounter++,
+          id: String(pergunta.id),
           tipo: 'ortografia',
           pergunta: pergunta.pergunta,
           opcoes: pergunta.opcoes,
@@ -198,7 +174,7 @@ router.post('/conjunto', async (req, res) => {
       );
       perguntasCiencias.forEach(pergunta => {
         perguntas.push({
-          id: idCounter++,
+          id: String(pergunta.id),
           tipo: 'ciencias',
           pergunta: pergunta.pergunta,
           opcoes: pergunta.opcoes,
@@ -271,7 +247,7 @@ router.post('/automatico/:filhoId', async (req, res) => {
       return res.status(404).json({ error: 'Conta do responsável não encontrada.' });
     }
     const saldoPai = parseFloat(contaPaiResult.rows[0].saldo);
-    const valorRecompensa = 2.00; // Máximo R$ 2,00 por dia
+    const valorRecompensa = 2.00;
     if (saldoPai < valorRecompensa) {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'Saldo insuficiente para criar o conjunto automático.' });
@@ -287,7 +263,6 @@ router.post('/automatico/:filhoId', async (req, res) => {
 
     // Gerar perguntas
     const perguntas = [];
-    let idCounter = 1;
 
     // Educação Financeira
     const perguntasFinanceira = await getRandomPerguntas(
@@ -298,7 +273,7 @@ router.post('/automatico/:filhoId', async (req, res) => {
     );
     perguntasFinanceira.forEach(pergunta => {
       perguntas.push({
-        id: idCounter++,
+        id: String(pergunta.id),
         tipo: 'educacao_financeira',
         pergunta: pergunta.pergunta,
         opcoes: pergunta.opcoes,
@@ -316,7 +291,7 @@ router.post('/automatico/:filhoId', async (req, res) => {
     );
     perguntasOrtografia.forEach(pergunta => {
       perguntas.push({
-        id: idCounter++,
+        id: String(pergunta.id),
         tipo: 'ortografia',
         pergunta: pergunta.pergunta,
         opcoes: pergunta.opcoes,
@@ -334,7 +309,7 @@ router.post('/automatico/:filhoId', async (req, res) => {
     );
     perguntasCiencias.forEach(pergunta => {
       perguntas.push({
-        id: idCounter++,
+        id: String(pergunta.id),
         tipo: 'ciencias',
         pergunta: pergunta.pergunta,
         opcoes: pergunta.opcoes,
@@ -347,7 +322,7 @@ router.post('/automatico/:filhoId', async (req, res) => {
     for (let i = 0; i < tipo_desafios.matematica; i++) {
       const desafio = generateMathChallenge();
       perguntas.push({
-        id: idCounter++,
+        id: `math_${i + 1}`,
         tipo: 'matematica',
         pergunta: desafio.pergunta,
         opcoes: null,
@@ -427,30 +402,18 @@ router.post('/conjunto/:conjunto_id/responder', async (req, res) => {
     const conjunto = conjuntoResult.rows[0];
 
     // Verificar a pergunta
-    const pergunta = conjunto.perguntas.find(p => p.id === parseInt(pergunta_id));
+    const pergunta = conjunto.perguntas.find(p => String(p.id) === String(pergunta_id));
     if (!pergunta) {
       await client.query('ROLLBACK');
-      console.log('Pergunta não encontrada:', { pergunta_id });
-      return res.status(404).json({ error: 'Pergunta não encontrada' });
+      console.log('Pergunta não encontrada no conjunto:', { pergunta_id, conjunto_id });
+      return res.status(404).json({ error: 'Pergunta não encontrada no conjunto' });
     }
-
-    // Verificar se a pergunta já foi respondida
-    // Verificar se a pergunta já foi respondida neste conjunto específico
-const respostaExistente = await client.query(
-  'SELECT id FROM respostas_desafios WHERE conjunto_id = $1 AND crianca_id = $2 AND pergunta_id = $3',
-  [conjunto_id, filho_id, pergunta_id]
-);
-if (respostaExistente.rows.length > 0) {
-  await client.query('ROLLBACK');
-  console.log('Pergunta já respondida neste conjunto:', { conjunto_id, filho_id, pergunta_id });
-  return res.status(400).json({ error: 'Pergunta já respondida neste conjunto' });
-}
 
     // Avaliar a resposta
     const correta = parseInt(resposta) === parseInt(pergunta.resposta_correta);
     await client.query(
-      'INSERT INTO respostas_desafios (conjunto_id, crianca_id, pergunta_id, resposta, correta) VALUES ($1, $2, $3, $4, $5)',
-      [conjunto_id, filho_id, pergunta_id, resposta, correta]
+      'INSERT INTO respostas_desafios (conjunto_id, crianca_id, pergunta_id, resposta, correta, tipo) VALUES ($1, $2, $3, $4, $5, $6)',
+      [conjunto_id, filho_id, String(pergunta_id), resposta, correta, pergunta.tipo]
     );
 
     // Contar respostas e acertos
@@ -466,10 +429,11 @@ if (respostaExistente.rows.length > 0) {
     let status = 'pendente';
     let message = correta ? 'Resposta correta!' : `Resposta incorreta. ${pergunta.explicacao}`;
 
-    if (totalRespostas === totalPerguntas) {
+    console.log('Processando resposta:', { acertos, totalRespostas, totalPerguntas, valor_recompensa: conjunto.valor_recompensa });
+
+    if (totalRespostas >= totalPerguntas) {
       status = acertos === totalPerguntas ? 'concluido' : 'falhou';
       if (conjunto.automatico) {
-        // Recompensa de R$ 1,00 a cada 10 acertos, máximo R$ 2,00
         recompensa = Math.min(Math.floor(acertos / 10) * 1.00, 2.00);
         if (recompensa > 0) {
           await client.query('UPDATE contas SET saldo = saldo - $1 WHERE pai_id = $2', [recompensa, conjunto.pai_id]);
@@ -480,27 +444,29 @@ if (respostaExistente.rows.length > 0) {
           );
         }
       } else if (acertos === totalPerguntas) {
-        // Recompensa total para desafios manuais
-        recompensa = conjunto.valor_recompensa;
-        await client.query('UPDATE contas SET saldo = saldo - $1 WHERE pai_id = $2', [recompensa, conjunto.pai_id]);
-        await client.query('UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2', [recompensa, filho_id]);
-        await client.query(
-          'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ((SELECT id FROM contas WHERE pai_id = $1), $2, $3, $4, $5)',
-          [conjunto.pai_id, 'transferencia', recompensa, `Recompensa por conjunto manual ${conjunto_id}`, 'desafio_manual']
-        );
+        recompensa = parseFloat(conjunto.valor_recompensa) || 0;
+        if (recompensa > 0) {
+          await client.query('UPDATE contas SET saldo = saldo - $1 WHERE pai_id = $2', [recompensa, conjunto.pai_id]);
+          await client.query('UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2', [recompensa, filho_id]);
+          await client.query(
+            'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ((SELECT id FROM contas WHERE pai_id = $1), $2, $3, $4, $5)',
+            [conjunto.pai_id, 'transferencia', recompensa, `Recompensa por conjunto manual ${conjunto_id}`, 'desafio_manual']
+          );
+        }
       }
       await client.query('UPDATE conjuntos_desafios SET status = $1 WHERE id = $2', [status, conjunto_id]);
 
-      // Adicionar notificação
       await client.query(
         'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
-        [filho_id, `Você ${status === 'concluido' ? 'completou' : 'não completou'} o conjunto de desafios! ${recompensa > 0 ? `Ganhou R$ ${recompensa.toFixed(2)}.` : ''}`, new Date()]
+        [filho_id, `Você ${status === 'concluido' ? 'completou' : 'não completou'} o conjunto de desafios! ${recompensa > 0 ? `Ganhou R$ ${Number(recompensa).toFixed(2)}.` : ''}`, new Date()]
       );
 
       message = status === 'concluido'
-        ? `Conjunto concluído!${recompensa > 0 ? ` Você ganhou R$ ${recompensa.toFixed(2)}!` : ''}`
+        ? `Conjunto concluído!${recompensa > 0 ? ` Você ganhou R$ ${Number(recompensa).toFixed(2)}!` : ''}`
         : `Conjunto finalizado com ${acertos} de ${totalPerguntas} acertos. Tente novamente!`;
     }
+
+    console.log('Resultado:', { recompensa, status, message });
 
     await client.query('COMMIT');
     res.json({ correta, explicacao: pergunta.explicacao, recompensa, status, message });
@@ -597,11 +563,10 @@ router.get('/historico/crianca/:filho_id', async (req, res) => {
   }
 });
 
-// Novo endpoint para histórico completo (conjuntos e matemáticos)
 router.get('/historico/completo/:id', async (req, res) => {
   console.log('Requisição recebida em /desafios/historico/completo/:id:', req.params.id);
   const { id } = req.params;
-  const { tipo } = req.query; // 'pai' ou 'filho'
+  const { tipo } = req.query;
 
   let client;
   try {
@@ -615,7 +580,6 @@ router.get('/historico/completo/:id', async (req, res) => {
     let conjuntosQuery, matematicaQuery;
 
     if (tipo === 'pai') {
-      // Histórico de conjuntos para o pai
       conjuntosQuery = `
         SELECT cd.id, cd.tipos, cd.valor_recompensa, cd.criado_em, f.nome_completo as crianca_nome,
                (SELECT COUNT(*) FROM respostas_desafios rd WHERE rd.conjunto_id = cd.id AND rd.correta) as acertos,
@@ -626,7 +590,6 @@ router.get('/historico/completo/:id', async (req, res) => {
         ORDER BY cd.criado_em DESC
         LIMIT 3
       `;
-      // Histórico de desafios matemáticos para o pai
       matematicaQuery = `
         SELECT dm.id, dm.filho_id, dm.pergunta, dm.resposta_correta, dm.valor, dm.status, dm.data_criacao, f.nome_completo as crianca_nome,
                'matematica' as tipo_desafio
@@ -637,7 +600,6 @@ router.get('/historico/completo/:id', async (req, res) => {
         LIMIT 3
       `;
     } else {
-      // Histórico de conjuntos para a criança
       conjuntosQuery = `
         SELECT cd.id, cd.tipos, cd.valor_recompensa, cd.criado_em, f.nome_completo as crianca_nome,
                (SELECT COUNT(*) FROM respostas_desafios rd WHERE rd.conjunto_id = cd.id AND rd.correta) as acertos,
@@ -648,7 +610,6 @@ router.get('/historico/completo/:id', async (req, res) => {
         ORDER BY cd.criado_em DESC
         LIMIT 3
       `;
-      // Histórico de desafios matemáticos para a criança
       matematicaQuery = `
         SELECT dm.id, dm.filho_id, dm.pergunta, dm.resposta_correta, dm.valor, dm.status, dm.data_criacao, f.nome_completo as crianca_nome,
                'matematica' as tipo_desafio
@@ -664,6 +625,9 @@ router.get('/historico/completo/:id', async (req, res) => {
       client.query(conjuntosQuery, [id]),
       client.query(matematicaQuery, [id])
     ]);
+
+    console.log('Conjuntos encontrados:', conjuntosResult.rows);
+    console.log('Desafios matemáticos encontrados:', matematicaResult.rows);
 
     const conjuntos = conjuntosResult.rows.map(row => ({
       id: row.id,
@@ -688,7 +652,6 @@ router.get('/historico/completo/:id', async (req, res) => {
       data_criacao: row.data_criacao
     }));
 
-    // Combinar e ordenar por data_criacao (mais recente primeiro), limitando a 3
     const historico = [...conjuntos, ...matematica]
       .sort((a, b) => new Date(b.data_criacao) - new Date(a.data_criacao))
       .slice(0, 3);
