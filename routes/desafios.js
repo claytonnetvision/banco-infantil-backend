@@ -1,28 +1,10 @@
-// backend/routes/desafios.js
 const express = require('express');
 const router = express.Router();
-const { Pool } = require('pg');
+const { pool } = require('../db');
 const { PERGUNTAS_EDUCACAO_FINANCEIRA } = require('../DesafiosEducacaoFinanceira');
 const { PERGUNTAS_ORTOGRAFIA } = require('../DesafiosOrtografia');
 const { PERGUNTAS_CIENCIAS } = require('../DesafiosCiencias');
 const { getRandomInt, generateMathChallenge, MODELOS_DESAFIOS } = require('../DesafiosMatematicos');
-
-require('dotenv').config();
-
-const pool = new Pool({
-  user: process.env.DB_USER,
-  host: process.env.DB_HOST,
-  database: process.env.DB_DATABASE,
-  password: process.env.DB_PASSWORD,
-  port: parseInt(process.env.DB_PORT),
-  max: 10,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 20000,
-  ssl: {
-    require: true,
-    rejectUnauthorized: false
-  }
-});
 
 // Função para embaralhar array (Fisher-Yates)
 function shuffleArray(array) {
@@ -43,7 +25,7 @@ async function getRandomPerguntas(filho_id, tipo, quantidade, perguntasEstaticas
 
     // Selecionar todas as perguntas disponíveis
     let disponiveis = [...perguntasEstaticas];
-    console.log(`Perguntas disponíveis (${tipo}) para filho ${filho_id}:`, disponiveis.length);
+    console.log(`Perguntas disponíveis (${tipo}) para filho ${filho_id || 'automático'}:`, disponiveis.length);
 
     // Verificar se há perguntas suficientes
     if (disponiveis.length < quantidade) {
@@ -60,6 +42,79 @@ async function getRandomPerguntas(filho_id, tipo, quantidade, perguntasEstaticas
     throw error;
   } finally {
     if (client) client.release();
+  }
+}
+
+// Função para buscar desafios (usada pelo Agendador.js)
+async function buscarDesafios(tipoDesafios) {
+  console.log('Buscando desafios automáticos:', tipoDesafios);
+  const perguntas = [];
+
+  try {
+    // Educação Financeira
+    if (tipoDesafios.educacao_financeira > 0) {
+      const perguntasFinanceira = await getRandomPerguntas(
+        null, // filho_id não necessário para desafios automáticos
+        'educacao_financeira',
+        tipoDesafios.educacao_financeira,
+        PERGUNTAS_EDUCACAO_FINANCEIRA
+      );
+      perguntasFinanceira.forEach(pergunta => {
+        perguntas.push({
+          id: String(pergunta.id),
+          tipo: 'educacao_financeira',
+          pergunta: pergunta.pergunta,
+          opcoes: pergunta.opcoes,
+          resposta_correta: pergunta.resposta_correta,
+          explicacao: pergunta.explicacao
+        });
+      });
+    }
+
+    // Ortografia
+    if (tipoDesafios.ortografia > 0) {
+      const perguntasOrtografia = await getRandomPerguntas(
+        null,
+        'ortografia',
+        tipoDesafios.ortografia,
+        PERGUNTAS_ORTOGRAFIA
+      );
+      perguntasOrtografia.forEach(pergunta => {
+        perguntas.push({
+          id: String(pergunta.id),
+          tipo: 'ortografia',
+          pergunta: pergunta.pergunta,
+          opcoes: pergunta.opcoes,
+          resposta_correta: pergunta.resposta_correta,
+          explicacao: pergunta.explicacao
+        });
+      });
+    }
+
+    // Ciências
+    if (tipoDesafios.ciencias > 0) {
+      const perguntasCiencias = await getRandomPerguntas(
+        null,
+        'ciencias',
+        tipoDesafios.ciencias,
+        PERGUNTAS_CIENCIAS
+      );
+      perguntasCiencias.forEach(pergunta => {
+        perguntas.push({
+          id: String(pergunta.id),
+          tipo: 'ciencias',
+          pergunta: pergunta.pergunta,
+          opcoes: pergunta.opcoes,
+          resposta_correta: pergunta.resposta_correta,
+          explicacao: pergunta.explicacao
+        });
+      });
+    }
+
+    return perguntas;
+  } catch (error) {
+    console.error('Erro ao buscar desafios:', error.stack);
+    throw error;
   }
 }
 
@@ -1020,3 +1075,4 @@ router.get('/historico/matematicos/pai/:paiId', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.buscarDesafios = buscarDesafios;
