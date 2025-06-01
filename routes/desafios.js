@@ -746,13 +746,15 @@ router.get('/tentativas/:filhoId/:data', async (req, res) => {
     client = await pool.connect();
     await client.query('SET search_path TO banco_infantil');
     const result = await client.query(
-      'SELECT COUNT(*) as tentativas FROM tentativas_desafios WHERE filho_id = $1 AND DATE(data_tentativa) = $2',
+      'SELECT tentativas FROM tentativas_desafios WHERE filho_id = $1 AND data = $2',
       [filhoId, data]
     );
-    res.status(200).json({ tentativas: parseInt(result.rows[0].tentativas) });
+    const tentativas = result.rows[0]?.tentativas ?? 0; // Usa operador de coalescência nula
+    console.log(`Tentativas encontradas para filho ${filhoId} em ${data}: ${tentativas}`);
+    res.status(200).json({ tentativas });
   } catch (error) {
-    console.error('Erro ao verificar tentativas:', error.stack);
-    res.status(500).json({ error: 'Erro ao verificar tentativas', details: error.message });
+    console.error('Erro ao consultar tentativas:', error.stack);
+    res.status(500).json({ error: 'Erro ao consultar tentativas', details: error.message });
   } finally {
     if (client) {
       client.release();
@@ -767,13 +769,21 @@ router.post('/incrementar-tentativa/:filhoId', async (req, res) => {
   let client;
   try {
     client = await pool.connect();
+    await client.query('BEGIN');
     await client.query('SET search_path TO banco_infantil');
     await client.query(
-      'INSERT INTO tentativas_desafios (filho_id, data_tentativa) VALUES ($1, NOW())',
+      `INSERT INTO tentativas_desafios (filho_id, data, tentativas)
+       VALUES ($1, CURRENT_DATE, 1)
+       ON CONFLICT (filho_id, data)
+       DO UPDATE SET tentativas = tentativas_desafios.tentativas + 1`,
       [filhoId]
     );
+    await client.query('COMMIT');
     res.status(200).json({ message: 'Tentativa registrada com sucesso' });
   } catch (error) {
+    if (client) {
+      await client.query('ROLLBACK');
+    }
     console.error('Erro ao incrementar tentativa:', error.stack);
     res.status(500).json({ error: 'Erro ao registrar tentativa', details: error.message });
   } finally {

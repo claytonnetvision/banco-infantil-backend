@@ -488,4 +488,94 @@ router.post('/jogo/campo-minado/vitoria', async (req, res) => {
   }
 });
 
+// Endpoint para registrar vitória no jogo da memória
+router.post('/jogo/memoria/vitoria', async (req, res) => {
+  console.log('Requisição recebida em /jogo/memoria/vitoria:', req.body);
+  const { filho_id, pai_id } = req.body;
+
+  try {
+    if (!filho_id || !pai_id) {
+      console.log('Dados incompletos:', { filho_id, pai_id });
+      return res.status(400).json({ error: 'ID da criança e do responsável são obrigatórios' });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SET search_path TO banco_infantil');
+
+      // Verificar conta do responsável
+      const contaPaiResult = await client.query('SELECT id, saldo FROM contas WHERE pai_id = $1', [pai_id]);
+      if (contaPaiResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Conta do responsável não encontrada' });
+      }
+      const contaId = contaPaiResult.rows[0].id;
+      const saldoPai = parseFloat(contaPaiResult.rows[0].saldo);
+      const recompensa = 0.10;
+
+      if (saldoPai < recompensa) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Saldo insuficiente para conceder recompensa' });
+      }
+
+      // Deduzir do responsável
+      await client.query('UPDATE contas SET saldo = saldo - $1 WHERE pai_id = $2', [recompensa, pai_id]);
+      // Adicionar à criança
+      await client.query('UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2', [recompensa, filho_id]);
+      // Registrar transação
+      await client.query(
+        'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ($1, $2, $3, $4, $5)',
+        [contaId, 'transferencia', recompensa, 'Recompensa por vitória no Jogo da Memória', 'jogo_memoria']
+      );
+
+      // Adicionar notificação
+      await client.query(
+        'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
+        [filho_id, `Você ganhou R$ ${recompensa.toFixed(2)} por vencer no Jogo da Memória!`, new Date()]
+      );
+
+      // Verificar conquista "Primeiro Jogo da Memória"
+      const conquistaResult = await client.query(
+        `SELECT id FROM conquistas WHERE filho_id = $1 AND nome = $2`,
+        [filho_id, 'Primeiro Jogo da Memória']
+      );
+      if (conquistaResult.rows.length === 0) {
+        await client.query(
+          `INSERT INTO conquistas (filho_id, nome, descricao, icone, recompensa) 
+           VALUES ($1, $2, $3, $4, $5)`,
+          [filho_id, 'Primeiro Jogo da Memória', 'Você venceu seu primeiro Jogo da Memória!', 'trofeu2.png', 0.50]
+        );
+        if (saldoPai >= 0.50) {
+          await client.query(
+            'UPDATE contas SET saldo = saldo - $1 WHERE pai_id = $2',
+            [0.50, pai_id]
+          );
+          await client.query(
+            'UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2',
+            [0.50, filho_id]
+          );
+          await client.query(
+            'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ($1, $2, $3, $4, $5)',
+            [contaId, 'transferencia', 0.50, `Recompensa por conquista: Primeiro Jogo da Memória`, 'conquista']
+          );
+          await client.query(
+            'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
+            [filho_id, `Você desbloqueou a conquista "Primeiro Jogo da Memória" e ganhou R$ 0.50!`, new Date()]
+          );
+        }
+      }
+
+      await client.query('COMMIT');
+      res.status(200).json({ message: 'Vitória registrada! Recompensa concedida.' });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Erro ao registrar vitória:', error.stack);
+    res.status(500).json({ error: 'Erro ao registrar vitória', details: error.message });
+  }
+});
+
 module.exports = router;

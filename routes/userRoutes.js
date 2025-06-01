@@ -15,10 +15,12 @@ const handleMulterError = (err, req, res, next) => {
 };
 
 // Verificar se upload está definido
-const uploadMiddleware = upload ? upload : { single: () => (req, res, next) => {
-  console.error('Upload não configurado. Verifique upload.js');
-  res.status(500).json({ error: 'Upload de arquivos não disponível' });
-}};
+const uploadMiddleware = upload ? upload : {
+  single: () => (req, res, next) => {
+    console.error('Upload não configurado. Verifique upload.js');
+    res.status(500).json({ error: 'Upload de arquivos não disponível' });
+  }
+};
 
 // Endpoint para upload de avatar da criança
 router.post('/perfil/avatar', uploadMiddleware.single('avatar'), handleMulterError, async (req, res) => {
@@ -264,10 +266,11 @@ router.get('/filho/:filhoId', async (req, res) => {
     try {
       await client.query('SET search_path TO banco_infantil');
       const result = await client.query(
-        'SELECT id, nome_completo, email, icone, background, pai_id, chave_pix FROM filhos WHERE id = $1',
+        'SELECT id, nome_completo, email, telefone, icone, background, pai_id, chave_pix FROM filhos WHERE id = $1',
         [filhoId]
       );
       if (result.rows.length === 0) {
+        console.log('Criança não encontrada:', { filhoId });
         return res.status(404).json({ error: 'Criança não encontrada' });
       }
       res.status(200).json({ filho: result.rows[0] });

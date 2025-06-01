@@ -20,6 +20,63 @@ router.post('/tarefa', async (req, res) => {
         'INSERT INTO tarefas (filho_id, descricao, valor, status) VALUES ($1, $2, $3, $4) RETURNING id',
         [filho_id, descricao, valor, 'pendente']
       );
+
+      // Atualizar progresso da missão diária de tarefas
+      await client.query(
+        `UPDATE missoes_diarias 
+         SET progresso = progresso + 1 
+         WHERE filho_id = $1 
+         AND tipo = 'tarefas' 
+         AND data_criacao = CURRENT_DATE 
+         AND status = 'pendente'`,
+        [filho_id]
+      );
+
+      // Verificar se a missão foi concluída
+      const missaoResult = await client.query(
+        `SELECT id, progresso, meta, recompensa 
+         FROM missoes_diarias 
+         WHERE filho_id = $1 
+         AND tipo = 'tarefas' 
+         AND data_criacao = CURRENT_DATE 
+         AND status = 'pendente'`,
+        [filho_id]
+      );
+
+      if (missaoResult.rows.length > 0 && missaoResult.rows[0].progresso >= missaoResult.rows[0].meta) {
+        await client.query(
+          `UPDATE missoes_diarias 
+           SET status = 'concluido' 
+           WHERE id = $1`,
+          [missaoResult.rows[0].id]
+        );
+
+        // Adicionar recompensa
+        const contaPaiResult = await client.query(
+          'SELECT id, saldo FROM contas WHERE pai_id = (SELECT pai_id FROM filhos WHERE id = $1)',
+          [filho_id]
+        );
+        if (contaPaiResult.rows.length > 0 && contaPaiResult.rows[0].saldo >= missaoResult.rows[0].recompensa) {
+          const contaId = contaPaiResult.rows[0].id;
+          await client.query(
+            'UPDATE contas SET saldo = saldo - $1 WHERE id = $2',
+            [missaoResult.rows[0].recompensa, contaId]
+          );
+          await client.query(
+            'UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2',
+            [missaoResult.rows[0].recompensa, filho_id]
+          );
+          await client.query(
+            'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ($1, $2, $3, $4, $5)',
+            [contaId, 'transferencia', missaoResult.rows[0].recompensa, `Recompensa por missão diária de tarefas`, 'missao_diaria']
+          );
+          await client.query(
+            'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
+            [filho_id, `Você completou a missão diária de tarefas e ganhou R$ ${missaoResult.rows[0].recompensa.toFixed(2)}!`, new Date()]
+          );
+        }
+      }
+
       res.status(201).json({ tarefa: result.rows[0], message: 'Tarefa cadastrada com sucesso!' });
     } finally {
       client.release();
@@ -159,6 +216,37 @@ router.post('/tarefa/aprovar/:tarefaId', async (req, res) => {
       'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
       [filho_id, `Sua tarefa foi aprovada! Você ganhou R$ ${valorTarefa.toFixed(2)}.`, new Date()]
     );
+
+    // Verificar conquista "Primeira Tarefa Concluída"
+    const conquistaResult = await client.query(
+      `SELECT id FROM conquistas WHERE filho_id = $1 AND nome = $2`,
+      [filho_id, 'Primeira Tarefa Concluída']
+    );
+    if (conquistaResult.rows.length === 0) {
+      await client.query(
+        `INSERT INTO conquistas (filho_id, nome, descricao, icone, recompensa) 
+         VALUES ($1, $2, $3, $4, $5)`,
+        [filho_id, 'Primeira Tarefa Concluída', 'Você concluiu sua primeira tarefa!', 'trofeu1.png', 0.50]
+      );
+      if (saldoPai >= 0.50) {
+        await client.query(
+          'UPDATE contas SET saldo = saldo - $1 WHERE pai_id = $2',
+          [0.50, pai_id]
+        );
+        await client.query(
+          'UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2',
+          [0.50, filho_id]
+        );
+        await client.query(
+          'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ($1, $2, $3, $4, $5)',
+          [contaId, 'transferencia', 0.50, `Recompensa por conquista: Primeira Tarefa Concluída`, 'conquista']
+        );
+        await client.query(
+          'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
+          [filho_id, `Você desbloqueou a conquista "Primeira Tarefa Concluída" e ganhou R$ 0.50!`, new Date()]
+        );
+      }
+    }
 
     await client.query('COMMIT');
     res.status(200).json({ transacao: result.rows[0], message: 'Tarefa aprovada com sucesso!' });
@@ -872,6 +960,200 @@ router.post('/tarefas-automaticas/:id/clonar', async (req, res) => {
     await client.query('ROLLBACK');
     console.error('Erro ao clonar tarefa automática:', error.stack);
     res.status(500).json({ error: 'Erro ao clonar tarefa automática', details: error.message });
+  }
+});
+
+// Endpoint para criar/atualizar missões diárias
+router.post('/missao-diaria/:filhoId', async (req, res) => {
+  console.log('Requisição recebida em /missao-diaria/:filhoId:', req.params.filhoId);
+  const { filhoId } = req.params;
+
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SET search_path TO banco_infantil');
+
+      // Verificar se a criança existe
+      const filhoResult = await client.query('SELECT id, pai_id FROM filhos WHERE id = $1', [filhoId]);
+      if (filhoResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Criança não encontrada' });
+      }
+      const paiId = filhoResult.rows[0].pai_id;
+
+      // Verificar saldo do responsável
+      const contaPaiResult = await client.query('SELECT id, saldo FROM contas WHERE pai_id = $1', [paiId]);
+      if (contaPaiResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Conta do responsável não encontrada' });
+      }
+      const saldoPai = parseFloat(contaPaiResult.rows[0].saldo);
+      if (saldoPai < 0.80) { // 0.30 para desafios + 0.50 para tarefas
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Saldo insuficiente para criar missões diárias' });
+      }
+
+      // Criar/atualizar missão de desafios (3 desafios, R$0.30)
+      await client.query(
+        `INSERT INTO missoes_diarias (filho_id, tipo, meta, progresso, recompensa, status, data_criacao)
+         VALUES ($1, $2, $3, $4, $5, $6, CURRENT_DATE)
+         ON CONFLICT (filho_id, tipo, data_criacao)
+         DO UPDATE SET progresso = $4, status = $6
+         WHERE missoes_diarias.status = 'pendente'`,
+        [filhoId, 'desafios', 3, 0, 0.30, 'pendente']
+      );
+
+      // Criar/atualizar missão de tarefas (5 tarefas, R$0.50)
+      await client.query(
+        `INSERT INTO missoes_diarias (filho_id, tipo, meta, progresso, recompensa, status, data_criacao)
+         VALUES ($1, $2, $3, $4, $5, $6, CURRENT_DATE)
+         ON CONFLICT (filho_id, tipo, data_criacao)
+         DO UPDATE SET progresso = $4, status = $6
+         WHERE missoes_diarias.status = 'pendente'`,
+        [filhoId, 'tarefas', 5, 0, 0.50, 'pendente']
+      );
+
+      await client.query('COMMIT');
+      res.status(201).json({ message: 'Missões diárias configuradas com sucesso!' });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Erro ao configurar missões diárias:', error.stack);
+    res.status(500).json({ error: 'Erro ao configurar missões diárias', details: error.message });
+  }
+});
+
+// Endpoint para obter progresso das missões diárias
+router.get('/missao-diaria/:filhoId', async (req, res) => {
+  console.log('Requisição recebida em /missao-diaria/:filhoId:', req.params.filhoId);
+  const { filhoId } = req.params;
+
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query('SET search_path TO banco_infantil');
+      const result = await client.query(
+        `SELECT id, tipo, meta, progresso, recompensa, status
+         FROM missoes_diarias
+         WHERE filho_id = $1 AND data_criacao = CURRENT_DATE`,
+        [filhoId]
+      );
+      res.status(200).json({ missoes: result.rows });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Erro ao obter missões diárias:', error.stack);
+    res.status(500).json({ error: 'Erro ao obter missões diárias', details: error.message });
+  }
+});
+
+// Endpoint para desbloquear conquista
+router.post('/conquista/:filhoId', async (req, res) => {
+  console.log('Requisição recebida em /conquista/:filhoId:', req.params.filhoId, req.body);
+  const { filhoId } = req.params;
+  const { nome, descricao, icone, recompensa } = req.body;
+
+  try {
+    if (!nome || !descricao || !icone) {
+      return res.status(400).json({ error: 'Nome, descrição e ícone da conquista são obrigatórios' });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SET search_path TO banco_infantil');
+
+      // Verificar se a conquista já existe
+      const conquistaResult = await client.query(
+        `SELECT id FROM conquistas WHERE filho_id = $1 AND nome = $2`,
+        [filhoId, nome]
+      );
+      if (conquistaResult.rows.length > 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Conquista já desbloqueada' });
+      }
+
+      // Inserir conquista
+      const result = await client.query(
+        `INSERT INTO conquistas (filho_id, nome, descricao, icone, recompensa)
+         VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+        [filhoId, nome, descricao, icone, recompensa || 0.00]
+      );
+
+      if (recompensa && recompensa > 0) {
+        const contaPaiResult = await client.query(
+          'SELECT id, saldo FROM contas WHERE pai_id = (SELECT pai_id FROM filhos WHERE id = $1)',
+          [filhoId]
+        );
+        if (contaPaiResult.rows.length === 0) {
+          await client.query('ROLLBACK');
+          return res.status(404).json({ error: 'Conta do responsável não encontrada' });
+        }
+        const contaId = contaPaiResult.rows[0].id;
+        const saldoPai = parseFloat(contaPaiResult.rows[0].saldo);
+
+        if (saldoPai < recompensa) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: 'Saldo insuficiente para recompensar a conquista' });
+        }
+
+        await client.query(
+          'UPDATE contas SET saldo = saldo - $1 WHERE id = $2',
+          [recompensa, contaId]
+        );
+        await client.query(
+          'UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2',
+          [recompensa, filhoId]
+        );
+        await client.query(
+          'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ($1, $2, $3, $4, $5)',
+          [contaId, 'transferencia', recompensa, `Recompensa por conquista: ${nome}`, 'conquista']
+        );
+        await client.query(
+          'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
+          [filhoId, `Você desbloqueou a conquista "${nome}" e ganhou R$ ${recompensa.toFixed(2)}!`, new Date()]
+        );
+      }
+
+      await client.query('COMMIT');
+      res.status(201).json({ conquista: result.rows[0], message: 'Conquista desbloqueada com sucesso!' });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Erro ao desbloquear conquista:', error.stack);
+    res.status(500).json({ error: 'Erro ao desbloquear conquista', details: error.message });
+  }
+});
+
+// Endpoint para listar conquistas
+router.get('/conquistas/:filhoId', async (req, res) => {
+  console.log('Requisição recebida em /conquistas/:filhoId:', req.params.filhoId);
+  const { filhoId } = req.params;
+
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query('SET search_path TO banco_infantil');
+      const result = await client.query(
+        `SELECT id, nome, descricao, icone, recompensa, data_desbloqueio
+         FROM conquistas
+         WHERE filho_id = $1
+         ORDER BY data_desbloqueio DESC`,
+        [filhoId]
+      );
+      res.status(200).json({ conquistas: result.rows });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Erro ao listar conquistas:', error.stack);
+    res.status(500).json({ error: 'Erro ao listar conquistas', details: error.message });
   }
 });
 

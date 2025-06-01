@@ -141,6 +141,47 @@ async function processarDesafiosAutomaticos(client) {
   }
 }
 
+async function processarMissoesDiarias(client) {
+  console.log('Processando missões diárias...');
+  try {
+    await client.query('SET search_path TO banco_infantil');
+    const filhosResult = await client.query('SELECT id, pai_id FROM filhos');
+
+    for (const filho of filhosResult.rows) {
+      const contaPaiResult = await client.query(
+        'SELECT id, saldo FROM contas WHERE pai_id = $1',
+        [filho.pai_id]
+      );
+      if (contaPaiResult.rows.length === 0 || contaPaiResult.rows[0].saldo < 0.80) {
+        console.log(`Saldo insuficiente para missões diárias do filho ${filho.id}`);
+        continue;
+      }
+
+      // Criar missão de desafios (3 desafios, R$0.30)
+      await client.query(
+        `INSERT INTO missoes_diarias (filho_id, tipo, meta, progresso, recompensa, status, data_criacao)
+         VALUES ($1, $2, $3, $4, $5, $6, CURRENT_DATE)
+         ON CONFLICT (filho_id, tipo, data_criacao)
+         DO NOTHING`,
+        [filho.id, 'desafios', 3, 0, 0.30, 'pendente']
+      );
+
+      // Criar missão de tarefas (5 tarefas, R$0.50)
+      await client.query(
+        `INSERT INTO missoes_diarias (filho_id, tipo, meta, progresso, recompensa, status, data_criacao)
+         VALUES ($1, $2, $3, $4, $5, $6, CURRENT_DATE)
+         ON CONFLICT (filho_id, tipo, data_criacao)
+         DO NOTHING`,
+        [filho.id, 'tarefas', 5, 0, 0.50, 'pendente']
+      );
+
+      console.log(`Missões diárias criadas para filho ${filho.id}`);
+    }
+  } catch (error) {
+    console.error('Erro ao processar missões diárias:', error.stack);
+  }
+}
+
 async function executarTarefasDiarias(pool) {
   console.log('Iniciando agendador de tarefas diárias...');
   const client = await pool.connect();
@@ -149,6 +190,7 @@ async function executarTarefasDiarias(pool) {
     await processarTarefasAutomaticas(client);
     await processarMesadas(client);
     await processarDesafiosAutomaticos(client);
+    await processarMissoesDiarias(client);
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK');
