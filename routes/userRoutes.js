@@ -280,4 +280,60 @@ router.get('/filho/:filhoId', async (req, res) => {
   }
 });
 
+// Endpoint para excluir perfil da criança
+router.delete('/filho/:filhoId', async (req, res) => {
+  console.log('Requisição recebida em /filho/:filhoId (DELETE):', req.params.filhoId);
+  const { filhoId } = req.params;
+  const { pai_id } = req.body;
+
+  try {
+    if (!pai_id) {
+      console.log('ID do responsável não fornecido');
+      return res.status(400).json({ error: 'ID do responsável é obrigatório' });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SET search_path TO banco_infantil');
+
+      // Verificar se a criança pertence ao responsável
+      const filhoResult = await client.query(
+        'SELECT id FROM filhos WHERE id = $1 AND pai_id = $2',
+        [filhoId, pai_id]
+      );
+      if (filhoResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        console.log('Criança não encontrada ou não pertence ao responsável:', { filhoId, pai_id });
+        return res.status(404).json({ error: 'Criança não encontrada ou não pertence ao responsável' });
+      }
+
+      // Excluir dados associados
+      await client.query('DELETE FROM contas_filhos WHERE filho_id = $1', [filhoId]);
+      await client.query('DELETE FROM transacoes WHERE descricao LIKE $1', [`%${filhoId}%`]);
+      await client.query('DELETE FROM tarefas WHERE filho_id = $1', [filhoId]);
+      await client.query('DELETE FROM tarefas_automaticas WHERE filho_id = $1', [filhoId]);
+      await client.query('DELETE FROM respostas_desafios WHERE crianca_id = $1', [filhoId]);
+      await client.query('DELETE FROM conjuntos_desafios WHERE filho_id = $1', [filhoId]);
+      await client.query('DELETE FROM desafios_matematicos WHERE filho_id = $1', [filhoId]);
+      await client.query('DELETE FROM tentativas_desafios WHERE filho_id = $1', [filhoId]);
+      await client.query('DELETE FROM notificacoes WHERE filho_id = $1', [filhoId]);
+      await client.query('DELETE FROM mesadas WHERE filho_id = $1', [filhoId]);
+
+      // Excluir a criança
+      await client.query('DELETE FROM filhos WHERE id = $1', [filhoId]);
+
+      await client.query('COMMIT');
+      console.log('Perfil da criança excluído com sucesso:', { filhoId });
+      res.status(200).json({ message: 'Perfil da criança excluído com sucesso' });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Erro ao excluir perfil da criança:', error.stack);
+    res.status(500).json({ error: 'Erro ao excluir perfil da criança', details: error.message });
+  }
+});
+
 module.exports = router;
