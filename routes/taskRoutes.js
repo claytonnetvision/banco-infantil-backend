@@ -1,3 +1,4 @@
+// backend/routes/taskRoutes.js
 const express = require('express');
 const router = express.Router();
 const { pool } = require('../db');
@@ -16,12 +17,13 @@ router.post('/tarefa', async (req, res) => {
     const client = await pool.connect();
     try {
       await client.query('SET search_path TO banco_infantil');
+      await client.query('BEGIN');
+
       const result = await client.query(
         'INSERT INTO tarefas (filho_id, descricao, valor, status) VALUES ($1, $2, $3, $4) RETURNING id',
         [filho_id, descricao, valor, 'pendente']
       );
 
-      // Atualizar progresso da missão diária de tarefas
       await client.query(
         `UPDATE missoes_diarias 
          SET progresso = progresso + 1 
@@ -32,7 +34,6 @@ router.post('/tarefa', async (req, res) => {
         [filho_id]
       );
 
-      // Verificar se a missão foi concluída
       const missaoResult = await client.query(
         `SELECT id, progresso, meta, recompensa 
          FROM missoes_diarias 
@@ -51,7 +52,6 @@ router.post('/tarefa', async (req, res) => {
           [missaoResult.rows[0].id]
         );
 
-        // Adicionar recompensa
         const contaPaiResult = await client.query(
           'SELECT id, saldo FROM contas WHERE pai_id = (SELECT pai_id FROM filhos WHERE id = $1)',
           [filho_id]
@@ -77,6 +77,16 @@ router.post('/tarefa', async (req, res) => {
         }
       }
 
+      if (result.rows.length > 0) {
+        await client.query(
+          `UPDATE objetivos 
+           SET valor_atual = valor_atual + $1 
+           WHERE filho_id = $2 AND status = 'pendente'`,
+          [valor, filho_id]
+        );
+      }
+
+      await client.query('COMMIT');
       res.status(201).json({ tarefa: result.rows[0], message: 'Tarefa cadastrada com sucesso!' });
     } finally {
       client.release();
@@ -164,7 +174,6 @@ router.post('/tarefa/aprovar/:tarefaId', async (req, res) => {
     await client.query('BEGIN');
     await client.query('SET search_path TO banco_infantil');
 
-    // Verificar tarefa
     const tarefaResult = await client.query('SELECT valor, status FROM tarefas WHERE id = $1 AND filho_id = $2', [tarefaId, filho_id]);
     if (tarefaResult.rows.length === 0) {
       await client.query('ROLLBACK');
@@ -176,14 +185,12 @@ router.post('/tarefa/aprovar/:tarefaId', async (req, res) => {
       return res.status(400).json({ error: 'Tarefa não está concluída pela criança' });
     }
 
-    // Validar e converter tarefa.valor para número
     const valorTarefa = parseFloat(tarefa.valor);
     if (isNaN(valorTarefa) || valorTarefa <= 0) {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'Valor da tarefa é inválido' });
     }
 
-    // Buscar a conta do responsável
     const contaPaiResult = await client.query('SELECT id, saldo FROM contas WHERE pai_id = $1', [pai_id]);
     if (contaPaiResult.rows.length === 0) {
       await client.query('ROLLBACK');
@@ -192,32 +199,30 @@ router.post('/tarefa/aprovar/:tarefaId', async (req, res) => {
     const contaId = contaPaiResult.rows[0].id;
     const saldoPai = parseFloat(contaPaiResult.rows[0].saldo);
 
-    // Verificar saldo suficiente
     if (saldoPai < valorTarefa) {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'Saldo insuficiente para aprovar a tarefa' });
     }
 
-    // Atualizar status da tarefa
     await client.query('UPDATE tarefas SET status = $1 WHERE id = $2', ['aprovada', tarefaId]);
-
-    // Deduzir do responsável
     await client.query('UPDATE contas SET saldo = saldo - $1 WHERE pai_id = $2', [valorTarefa, pai_id]);
-    // Adicionar à criança
     await client.query('UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2', [valorTarefa, filho_id]);
-    // Registrar transação
+    await client.query(
+      `UPDATE objetivos 
+       SET valor_atual = valor_atual + $1 
+       WHERE filho_id = $2 AND status = 'pendente'`,
+      [valorTarefa, filho_id]
+    );
     const result = await client.query(
       'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ($1, $2, $3, $4, $5) RETURNING id',
       [contaId, 'transferencia', valorTarefa, `Recompensa por tarefa ${tarefaId}`, 'tarefa']
     );
 
-    // Adicionar notificação para a criança
     await client.query(
       'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
       [filho_id, `Sua tarefa foi aprovada! Você ganhou R$ ${valorTarefa.toFixed(2)}.`, new Date()]
     );
 
-    // Verificar conquista "Primeira Tarefa Concluída"
     const conquistaResult = await client.query(
       `SELECT id FROM conquistas WHERE filho_id = $1 AND nome = $2`,
       [filho_id, 'Primeira Tarefa Concluída']
@@ -308,7 +313,6 @@ router.post('/mesada', async (req, res) => {
       await client.query('BEGIN');
       await client.query('SET search_path TO banco_infantil');
 
-      // Verificar se pai e filho existem
       const paiExists = await client.query('SELECT id FROM pais WHERE id = $1', [pai_id]);
       if (paiExists.rows.length === 0) {
         await client.query('ROLLBACK');
@@ -321,7 +325,6 @@ router.post('/mesada', async (req, res) => {
         return res.status(404).json({ error: 'Criança não encontrada ou não pertence ao responsável' });
       }
 
-      // Verificar se já existe mesada para a criança
       const mesadaExistente = await client.query(
         'SELECT id FROM mesadas WHERE pai_id = $1 AND filho_id = $2',
         [pai_id, filho_id]
@@ -331,16 +334,14 @@ router.post('/mesada', async (req, res) => {
         return res.status(400).json({ error: 'Já existe uma mesada configurada para esta criança' });
       }
 
-      // Inserir mesada
       const result = await client.query(
-        'INSERT INTO mesadas (pai_id, filho_id, valor, dia_semana, ativo) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+        'INSERT INTO mesadas (pai_id, filho_id, valor, dia_semana, ativo) VALUES ($1, $2, $3, $4, $5) RETURNING id, pai_id, filho_id, valor, dia_semana, ativo',
         [pai_id, filho_id, valor, dia_semana, true]
       );
 
-      // Adicionar notificação para a criança
       await client.query(
         'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
-        [filho_id, `Sua mesada de R$ ${valor.toFixed(2)} foi configurada para ${dia_semana}!`, new Date()]
+        [filho_id, `Nova mesada configurada: R$ ${valor.toFixed(2)} às ${dia_semana}.`, new Date()]
       );
 
       await client.query('COMMIT');
@@ -349,7 +350,6 @@ router.post('/mesada', async (req, res) => {
       client.release();
     }
   } catch (error) {
-    await client.query('ROLLBACK');
     console.error('Erro ao configurar mesada:', error.stack);
     res.status(500).json({ error: 'Erro ao configurar mesada', details: error.message });
   }
@@ -378,7 +378,6 @@ router.put('/mesada/:id', async (req, res) => {
       await client.query('BEGIN');
       await client.query('SET search_path TO banco_infantil');
 
-      // Verificar se a mesada existe e pertence ao pai
       const mesadaExistente = await client.query(
         'SELECT id FROM mesadas WHERE id = $1 AND pai_id = $2 AND filho_id = $3',
         [id, pai_id, filho_id]
@@ -388,16 +387,14 @@ router.put('/mesada/:id', async (req, res) => {
         return res.status(404).json({ error: 'Mesada não encontrada ou não pertence ao usuário' });
       }
 
-      // Atualizar mesada
       const result = await client.query(
-        'UPDATE mesadas SET valor = $1, dia_semana = $2, ativo = $3 WHERE id = $4 RETURNING id',
+        'UPDATE mesadas SET valor = $1, dia_semana = $2, ativo = $3 WHERE id = $4 RETURNING id, pai_id, filho_id, valor, dia_semana, ativo',
         [valor, dia_semana, true, id]
       );
 
-      // Adicionar notificação para a criança
       await client.query(
         'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
-        [filho_id, `Sua mesada foi atualizada para R$ ${valor.toFixed(2)} às ${dia_semana}!`, new Date()]
+        [filho_id, `Sua mesada foi atualizada para R$ ${valor.toFixed(2)} às ${dia_semana}.`, new Date()]
       );
 
       await client.query('COMMIT');
@@ -406,7 +403,6 @@ router.put('/mesada/:id', async (req, res) => {
       client.release();
     }
   } catch (error) {
-    await client.query('ROLLBACK');
     console.error('Erro ao atualizar mesada:', error.stack);
     res.status(500).json({ error: 'Erro ao atualizar mesada', details: error.message });
   }
@@ -414,31 +410,35 @@ router.put('/mesada/:id', async (req, res) => {
 
 // Endpoint para excluir mesada
 router.delete('/mesada/:id', async (req, res) => {
-  console.log('Requisição recebida em /mesada/:id (DELETE):', req.params.id);
+  console.log('Requisição recebida em /mesada/:id (DELETE):', req.params.id, req.body);
   const { id } = req.params;
+  const { pai_id, filho_id } = req.body;
 
   try {
+    if (!pai_id || !filho_id) {
+      console.log('ID do responsável e da criança são obrigatórios');
+      return res.status(400).json({ error: 'ID do responsável e da criança são obrigatórios' });
+    }
+
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
       await client.query('SET search_path TO banco_infantil');
 
-      // Verificar se a mesada existe
-      const mesadaExistente = await client.query('SELECT id, filho_id FROM mesadas WHERE id = $1', [id]);
+      const mesadaExistente = await client.query(
+        'SELECT id, filho_id FROM mesadas WHERE id = $1 AND pai_id = $2 AND filho_id = $3',
+        [id, pai_id, filho_id]
+      );
       if (mesadaExistente.rows.length === 0) {
         await client.query('ROLLBACK');
-        return res.status(404).json({ error: 'Mesada não encontrada' });
+        return res.status(404).json({ error: 'Mesada não encontrada ou não pertence ao usuário' });
       }
 
-      const filhoId = mesadaExistente.rows[0].filho_id;
-
-      // Excluir mesada
       await client.query('DELETE FROM mesadas WHERE id = $1', [id]);
 
-      // Adicionar notificação para a criança
       await client.query(
         'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
-        [filhoId, 'Sua mesada foi cancelada pelo responsável.', new Date()]
+        [filho_id, `Sua mesada foi cancelada pelo seu responsável.`, new Date()]
       );
 
       await client.query('COMMIT');
@@ -447,7 +447,6 @@ router.delete('/mesada/:id', async (req, res) => {
       client.release();
     }
   } catch (error) {
-    await client.query('ROLLBACK');
     console.error('Erro ao excluir mesada:', error.stack);
     res.status(500).json({ error: 'Erro ao excluir mesada', details: error.message });
   }
@@ -596,7 +595,6 @@ router.post('/tarefas-automaticas', async (req, res) => {
       await client.query('BEGIN');
       await client.query('SET search_path TO banco_infantil');
 
-      // Verificar se pai e filho existem
       const paiExists = await client.query('SELECT id FROM pais WHERE id = $1', [pai_id]);
       if (paiExists.rows.length === 0) {
         await client.query('ROLLBACK');
@@ -609,7 +607,6 @@ router.post('/tarefas-automaticas', async (req, res) => {
         return res.status(404).json({ error: 'Criança não encontrada ou não pertence ao responsável' });
       }
 
-      // Inserir tarefa automática
       const result = await client.query(
         'INSERT INTO tarefas_automaticas (pai_id, filho_id, descricao, valor, dias_semana, data_inicio, data_fim, ativo) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id',
         [pai_id, filho_id, descricao, valor, dias_semana, data_inicio, data_fim, true]
@@ -621,7 +618,6 @@ router.post('/tarefas-automaticas', async (req, res) => {
       client.release();
     }
   } catch (error) {
-    await client.query('ROLLBACK');
     console.error('Erro ao configurar tarefa automática:', error.stack);
     res.status(500).json({ error: 'Erro ao configurar tarefa automática', details: error.message });
   }
@@ -635,7 +631,25 @@ router.get('/tarefas-automaticas/listar/:paiId', async (req, res) => {
   try {
     const client = await pool.connect();
     try {
+      await client.query('BEGIN');
       await client.query('SET search_path TO banco_infantil');
+
+      // Excluir tarefas automáticas vencidas
+      const tarefasVencidas = await client.query(
+        `SELECT id, filho_id FROM tarefas_automaticas 
+         WHERE pai_id = $1 AND data_fim < CURRENT_DATE`,
+        [paiId]
+      );
+
+      for (const tarefa of tarefasVencidas.rows) {
+        await client.query('DELETE FROM tarefas_automaticas WHERE id = $1', [tarefa.id]);
+        await client.query(
+          'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
+          [tarefa.filho_id, `Uma tarefa automática expirou e foi removida.`, new Date()]
+        );
+      }
+
+      // Listar tarefas automáticas válidas
       const result = await client.query(
         `SELECT ta.id, ta.filho_id, ta.descricao, ta.valor::float, ta.dias_semana, ta.data_inicio, ta.data_fim, ta.ativo, f.nome_completo
          FROM tarefas_automaticas ta
@@ -644,6 +658,8 @@ router.get('/tarefas-automaticas/listar/:paiId', async (req, res) => {
          ORDER BY ta.criado_em DESC`,
         [paiId]
       );
+
+      await client.query('COMMIT');
       console.log('Tarefas automáticas encontradas:', result.rows);
       res.status(200).json({ tarefas_automaticas: result.rows });
     } finally {
@@ -685,7 +701,6 @@ router.put('/tarefas-automaticas/:id', async (req, res) => {
       await client.query('BEGIN');
       await client.query('SET search_path TO banco_infantil');
 
-      // Verificar se a tarefa automática existe
       const tarefaExistente = await client.query(
         'SELECT id FROM tarefas_automaticas WHERE id = $1 AND pai_id = $2 AND filho_id = $3',
         [id, pai_id, filho_id]
@@ -695,7 +710,6 @@ router.put('/tarefas-automaticas/:id', async (req, res) => {
         return res.status(404).json({ error: 'Tarefa automática não encontrada ou não pertence ao usuário' });
       }
 
-      // Atualizar tarefa automática
       const result = await client.query(
         'UPDATE tarefas_automaticas SET descricao = $1, valor = $2, dias_semana = $3, data_inicio = $4, data_fim = $5, ativo = $6 WHERE id = $7 RETURNING id',
         [descricao, valor, dias_semana, data_inicio, data_fim, true, id]
@@ -707,7 +721,6 @@ router.put('/tarefas-automaticas/:id', async (req, res) => {
       client.release();
     }
   } catch (error) {
-    await client.query('ROLLBACK');
     console.error('Erro ao atualizar tarefa automática:', error.stack);
     res.status(500).json({ error: 'Erro ao atualizar tarefa automática', details: error.message });
   }
@@ -724,7 +737,6 @@ router.delete('/tarefas-automaticas/:id', async (req, res) => {
       await client.query('BEGIN');
       await client.query('SET search_path TO banco_infantil');
 
-      // Verificar se a tarefa automática existe
       const tarefaExistente = await client.query('SELECT id, filho_id FROM tarefas_automaticas WHERE id = $1', [id]);
       if (tarefaExistente.rows.length === 0) {
         await client.query('ROLLBACK');
@@ -733,10 +745,8 @@ router.delete('/tarefas-automaticas/:id', async (req, res) => {
 
       const filhoId = tarefaExistente.rows[0].filho_id;
 
-      // Excluir tarefa automática
       await client.query('DELETE FROM tarefas_automaticas WHERE id = $1', [id]);
 
-      // Adicionar notificação para a criança
       await client.query(
         'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
         [filhoId, 'Uma tarefa automática foi cancelada pelo responsável.', new Date()]
@@ -748,7 +758,6 @@ router.delete('/tarefas-automaticas/:id', async (req, res) => {
       client.release();
     }
   } catch (error) {
-    await client.query('ROLLBACK');
     console.error('Erro ao excluir tarefa automática:', error.stack);
     res.status(500).json({ error: 'Erro ao excluir tarefa automática', details: error.message });
   }
@@ -771,7 +780,6 @@ router.put('/tarefas-automaticas/:id/ativar', async (req, res) => {
       await client.query('BEGIN');
       await client.query('SET search_path TO banco_infantil');
 
-      // Verificar se a tarefa automática existe
       const tarefaExistente = await client.query('SELECT id, filho_id FROM tarefas_automaticas WHERE id = $1', [id]);
       if (tarefaExistente.rows.length === 0) {
         await client.query('ROLLBACK');
@@ -780,13 +788,11 @@ router.put('/tarefas-automaticas/:id/ativar', async (req, res) => {
 
       const filhoId = tarefaExistente.rows[0].filho_id;
 
-      // Atualizar estado
       const result = await client.query(
         'UPDATE tarefas_automaticas SET ativo = $1 WHERE id = $2 RETURNING id',
         [ativo, id]
       );
 
-      // Adicionar notificação para a criança
       await client.query(
         'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
         [filhoId, `Uma tarefa automática foi ${ativo ? 'ativada' : 'desativada'} pelo responsável.`, new Date()]
@@ -798,7 +804,6 @@ router.put('/tarefas-automaticas/:id/ativar', async (req, res) => {
       client.release();
     }
   } catch (error) {
-    await client.query('ROLLBACK');
     console.error('Erro ao ativar/desativar tarefa automática:', error.stack);
     res.status(500).json({ error: 'Erro ao ativar/desativar tarefa automática', details: error.message });
   }
@@ -815,7 +820,6 @@ router.post('/tarefas-automaticas/:id/aplicar-agora', async (req, res) => {
       await client.query('BEGIN');
       await client.query('SET search_path TO banco_infantil');
 
-      // Buscar a tarefa automática
       const tarefaResult = await client.query(
         'SELECT filho_id, descricao, valor, data_inicio, data_fim, ativo FROM tarefas_automaticas WHERE id = $1',
         [id]
@@ -832,7 +836,6 @@ router.post('/tarefas-automaticas/:id/aplicar-agora', async (req, res) => {
       const dataInicio = new Date(tarefa.data_inicio);
       const dataFim = new Date(tarefa.data_fim);
 
-      // Verificar se a tarefa está ativa e dentro do período válido
       if (!tarefa.ativo) {
         await client.query('ROLLBACK');
         return res.status(400).json({ error: 'Tarefa automática está desativada' });
@@ -843,7 +846,6 @@ router.post('/tarefas-automaticas/:id/aplicar-agora', async (req, res) => {
         return res.status(400).json({ error: 'Tarefa automática fora do período válido' });
       }
 
-      // Verificar se já existe uma tarefa para hoje
       const tarefaExistente = await client.query(
         'SELECT id FROM tarefas WHERE filho_id = $1 AND descricao = $2 AND DATE(data_criacao) = CURRENT_DATE',
         [tarefa.filho_id, tarefa.descricao]
@@ -854,13 +856,11 @@ router.post('/tarefas-automaticas/:id/aplicar-agora', async (req, res) => {
         return res.status(400).json({ error: 'Já existe uma tarefa com essa descrição para hoje' });
       }
 
-      // Criar a tarefa
       const result = await client.query(
         'INSERT INTO tarefas (filho_id, descricao, valor, status) VALUES ($1, $2, $3, $4) RETURNING id',
         [tarefa.filho_id, tarefa.descricao, tarefa.valor, 'pendente']
       );
 
-      // Adicionar notificação para a criança
       await client.query(
         'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
         [tarefa.filho_id, `Nova tarefa automática aplicada: ${tarefa.descricao} (R$ ${parseFloat(tarefa.valor).toFixed(2)})`, new Date()]
@@ -872,7 +872,6 @@ router.post('/tarefas-automaticas/:id/aplicar-agora', async (req, res) => {
       client.release();
     }
   } catch (error) {
-    await client.query('ROLLBACK');
     console.error('Erro ao aplicar tarefa automática:', error.stack);
     res.status(500).json({ error: 'Erro ao aplicar tarefa automática', details: error.message });
   }
@@ -895,7 +894,6 @@ router.post('/tarefas-automaticas/:id/clonar', async (req, res) => {
       await client.query('BEGIN');
       await client.query('SET search_path TO banco_infantil');
 
-      // Buscar a tarefa automática original
       const tarefaOriginalResult = await client.query(
         'SELECT pai_id, filho_id, descricao, valor, dias_semana, data_inicio, data_fim, ativo FROM tarefas_automaticas WHERE id = $1',
         [id]
@@ -908,7 +906,6 @@ router.post('/tarefas-automaticas/:id/clonar', async (req, res) => {
 
       const tarefaOriginal = tarefaOriginalResult.rows[0];
 
-      // Verificar se o filho destino é válido e pertence ao mesmo pai
       const filhoExists = await client.query(
         'SELECT id FROM filhos WHERE id = $1 AND pai_id = $2',
         [filho_id, tarefaOriginal.pai_id]
@@ -919,7 +916,6 @@ router.post('/tarefas-automaticas/:id/clonar', async (req, res) => {
         return res.status(404).json({ error: 'Criança destino não encontrada ou não pertence ao responsável' });
       }
 
-      // Verificar se já existe uma tarefa automática idêntica para o filho destino
       const tarefaDuplicada = await client.query(
         'SELECT id FROM tarefas_automaticas WHERE pai_id = $1 AND filho_id = $2 AND descricao = $3 AND data_inicio = $4 AND data_fim = $5',
         [tarefaOriginal.pai_id, filho_id, tarefaOriginal.descricao, tarefaOriginal.data_inicio, tarefaOriginal.data_fim]
@@ -930,7 +926,6 @@ router.post('/tarefas-automaticas/:id/clonar', async (req, res) => {
         return res.status(400).json({ error: 'Já existe uma tarefa automática idêntica para esta criança' });
       }
 
-      // Criar nova tarefa automática
       const result = await client.query(
         'INSERT INTO tarefas_automaticas (pai_id, filho_id, descricao, valor, dias_semana, data_inicio, data_fim, ativo) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id',
         [
@@ -945,7 +940,6 @@ router.post('/tarefas-automaticas/:id/clonar', async (req, res) => {
         ]
       );
 
-      // Adicionar notificação para a criança destino
       await client.query(
         'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
         [filho_id, `Nova tarefa automática clonada: ${tarefaOriginal.descricao} (R$ ${parseFloat(tarefaOriginal.valor).toFixed(2)})`, new Date()]
@@ -957,183 +951,261 @@ router.post('/tarefas-automaticas/:id/clonar', async (req, res) => {
       client.release();
     }
   } catch (error) {
-    await client.query('ROLLBACK');
     console.error('Erro ao clonar tarefa automática:', error.stack);
     res.status(500).json({ error: 'Erro ao clonar tarefa automática', details: error.message });
   }
 });
 
-// Endpoint para criar/atualizar missões diárias
-router.post('/missao-diaria/:filhoId', async (req, res) => {
-  console.log('Requisição recebida em /missao-diaria/:filhoId:', req.params.filhoId);
-  const { filhoId } = req.params;
+// Endpoint para criar missões diárias para 15 dias
+router.post('/missoes-diarias/criar', async (req, res) => {
+  console.log('Requisição recebida em /missoes-diarias/criar:', req.body);
+  const { pai_id, filho_id, tipo, meta, recompensa, dias } = req.body;
 
   try {
+    if (!pai_id || !filho_id || !tipo || !meta || !recompensa || !dias || dias.length > 15) {
+      console.log('Dados inválidos:', { pai_id, filho_id, tipo, meta, recompensa, dias });
+      return res.status(400).json({ error: 'Dados inválidos ou mais de 15 dias selecionados' });
+    }
+
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
       await client.query('SET search_path TO banco_infantil');
 
-      // Verificar se a criança existe
-      const filhoResult = await client.query('SELECT id, pai_id FROM filhos WHERE id = $1', [filhoId]);
-      if (filhoResult.rows.length === 0) {
-        await client.query('ROLLBACK');
-        return res.status(404).json({ error: 'Criança não encontrada' });
-      }
-      const paiId = filhoResult.rows[0].pai_id;
+      for (const dia of dias) {
+        const dataCriacao = new Date(dia);
+        const dataExpiracao = new Date(dataCriacao);
+        dataExpiracao.setDate(dataExpiracao.getDate() + 1);
 
-      // Verificar saldo do responsável
-      const contaPaiResult = await client.query('SELECT id, saldo FROM contas WHERE pai_id = $1', [paiId]);
-      if (contaPaiResult.rows.length === 0) {
-        await client.query('ROLLBACK');
-        return res.status(404).json({ error: 'Conta do responsável não encontrada' });
+        await client.query(
+          `INSERT INTO missoes_diarias (filho_id, tipo, meta, progresso, recompensa, status, data_criacao, data_expiracao)
+           VALUES ($1, $2, $3, 0, $4, 'pendente', $5, $6)
+           ON CONFLICT (filho_id, tipo, data_criacao) DO NOTHING`,
+          [filho_id, tipo, meta, recompensa, dataCriacao, dataExpiracao]
+        );
       }
-      const saldoPai = parseFloat(contaPaiResult.rows[0].saldo);
-      if (saldoPai < 0.80) { // 0.30 para desafios + 0.50 para tarefas
-        await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'Saldo insuficiente para criar missões diárias' });
-      }
-
-      // Criar/atualizar missão de desafios (3 desafios, R$0.30)
-      await client.query(
-        `INSERT INTO missoes_diarias (filho_id, tipo, meta, progresso, recompensa, status, data_criacao)
-         VALUES ($1, $2, $3, $4, $5, $6, CURRENT_DATE)
-         ON CONFLICT (filho_id, tipo, data_criacao)
-         DO UPDATE SET progresso = $4, status = $6
-         WHERE missoes_diarias.status = 'pendente'`,
-        [filhoId, 'desafios', 3, 0, 0.30, 'pendente']
-      );
-
-      // Criar/atualizar missão de tarefas (5 tarefas, R$0.50)
-      await client.query(
-        `INSERT INTO missoes_diarias (filho_id, tipo, meta, progresso, recompensa, status, data_criacao)
-         VALUES ($1, $2, $3, $4, $5, $6, CURRENT_DATE)
-         ON CONFLICT (filho_id, tipo, data_criacao)
-         DO UPDATE SET progresso = $4, status = $6
-         WHERE missoes_diarias.status = 'pendente'`,
-        [filhoId, 'tarefas', 5, 0, 0.50, 'pendente']
-      );
 
       await client.query('COMMIT');
-      res.status(201).json({ message: 'Missões diárias configuradas com sucesso!' });
+      res.status(200).json({ message: 'Missões diárias criadas com sucesso!' });
     } finally {
       client.release();
     }
   } catch (error) {
-    await client.query('ROLLBACK');
-    console.error('Erro ao configurar missões diárias:', error.stack);
-    res.status(500).json({ error: 'Erro ao configurar missões diárias', details: error.message });
+    console.error('Erro ao criar missões diárias:', error.stack);
+    res.status(500).json({ error: 'Erro ao criar missões diárias', details: error.message });
   }
 });
 
-// Endpoint para obter progresso das missões diárias
-router.get('/missao-diaria/:filhoId', async (req, res) => {
-  console.log('Requisição recebida em /missao-diaria/:filhoId:', req.params.filhoId);
-  const { filhoId } = req.params;
+// Endpoint para buscar missões diárias
+router.get('/missao-diaria/:filho_id', async (req, res) => {
+  console.log('Requisição recebida em /missao-diaria:', req.params.filho_id);
+  const { filho_id } = req.params;
 
   try {
     const client = await pool.connect();
     try {
       await client.query('SET search_path TO banco_infantil');
       const result = await client.query(
-        `SELECT id, tipo, meta, progresso, recompensa, status
-         FROM missoes_diarias
-         WHERE filho_id = $1 AND data_criacao = CURRENT_DATE`,
-        [filhoId]
+        `SELECT * FROM missoes_diarias WHERE filho_id = $1 AND data_criacao >= CURRENT_DATE`,
+        [filho_id]
       );
       res.status(200).json({ missoes: result.rows });
     } finally {
       client.release();
     }
   } catch (error) {
-    console.error('Erro ao obter missões diárias:', error.stack);
-    res.status(500).json({ error: 'Erro ao obter missões diárias', details: error.message });
+    console.error('Erro ao buscar missões diárias:', error.stack);
+    res.status(500).json({ error: 'Erro ao buscar missões diárias', details: error.message });
   }
 });
 
-// Endpoint para desbloquear conquista
-router.post('/conquista/:filhoId', async (req, res) => {
-  console.log('Requisição recebida em /conquista/:filhoId:', req.params.filhoId, req.body);
-  const { filhoId } = req.params;
-  const { nome, descricao, icone, recompensa } = req.body;
+// Endpoint para criar troféu diário
+router.post('/trofeus-diarios', async (req, res) => {
+  console.log('Requisição recebida em /trofeus-diarios:', req.body);
+  const { filho_id, icone, nome } = req.body;
 
   try {
-    if (!nome || !descricao || !icone) {
-      return res.status(400).json({ error: 'Nome, descrição e ícone da conquista são obrigatórios' });
-    }
-
     const client = await pool.connect();
     try {
-      await client.query('BEGIN');
       await client.query('SET search_path TO banco_infantil');
-
-      // Verificar se a conquista já existe
-      const conquistaResult = await client.query(
-        `SELECT id FROM conquistas WHERE filho_id = $1 AND nome = $2`,
-        [filhoId, nome]
-      );
-      if (conquistaResult.rows.length > 0) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'Conquista já desbloqueada' });
-      }
-
-      // Inserir conquista
       const result = await client.query(
-        `INSERT INTO conquistas (filho_id, nome, descricao, icone, recompensa)
-         VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-        [filhoId, nome, descricao, icone, recompensa || 0.00]
+        `INSERT INTO trofeus_diarios (filho_id, data, icone, nome)
+         VALUES ($1, CURRENT_DATE, $2, $3)
+         RETURNING id`,
+        [filho_id, icone, nome]
       );
-
-      if (recompensa && recompensa > 0) {
-        const contaPaiResult = await client.query(
-          'SELECT id, saldo FROM contas WHERE pai_id = (SELECT pai_id FROM filhos WHERE id = $1)',
-          [filhoId]
-        );
-        if (contaPaiResult.rows.length === 0) {
-          await client.query('ROLLBACK');
-          return res.status(404).json({ error: 'Conta do responsável não encontrada' });
-        }
-        const contaId = contaPaiResult.rows[0].id;
-        const saldoPai = parseFloat(contaPaiResult.rows[0].saldo);
-
-        if (saldoPai < recompensa) {
-          await client.query('ROLLBACK');
-          return res.status(400).json({ error: 'Saldo insuficiente para recompensar a conquista' });
-        }
-
-        await client.query(
-          'UPDATE contas SET saldo = saldo - $1 WHERE id = $2',
-          [recompensa, contaId]
-        );
-        await client.query(
-          'UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2',
-          [recompensa, filhoId]
-        );
-        await client.query(
-          'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ($1, $2, $3, $4, $5)',
-          [contaId, 'transferencia', recompensa, `Recompensa por conquista: ${nome}`, 'conquista']
-        );
-        await client.query(
-          'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
-          [filhoId, `Você desbloqueou a conquista "${nome}" e ganhou R$ ${recompensa.toFixed(2)}!`, new Date()]
-        );
-      }
-
-      await client.query('COMMIT');
-      res.status(201).json({ conquista: result.rows[0], message: 'Conquista desbloqueada com sucesso!' });
+      res.status(200).json({ message: 'Troféu diário registrado!', trofeuId: result.rows[0].id });
     } finally {
       client.release();
     }
   } catch (error) {
-    await client.query('ROLLBACK');
-    console.error('Erro ao desbloquear conquista:', error.stack);
-    res.status(500).json({ error: 'Erro ao desbloquear conquista', details: error.message });
+    console.error('Erro ao registrar troféu diário:', error.stack);
+    res.status(500).json({ error: 'Erro ao registrar troféu diário', details: error.message });
   }
 });
 
-// Endpoint para listar conquistas
+// Endpoint para buscar troféus diários
+router.get('/trofeus-diarios/:filho_id', async (req, res) => {
+  console.log('Requisição recebida em /trofeus-diarios:', req.params.filho_id);
+  const { filho_id } = req.params;
+
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query('SET search_path TO banco_infantil');
+      const result = await client.query(
+        `SELECT * FROM trofeus_diarios WHERE filho_id = $1 AND data >= CURRENT_DATE - INTERVAL '7 days'`,
+        [filho_id]
+      );
+      res.status(200).json({ trofeus: result.rows });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Erro ao buscar troféus diários:', error.stack);
+    res.status(500).json({ error: 'Erro ao buscar troféus diários', details: error.message });
+  }
+});
+
+// Endpoint para criar objetivo
+router.post('/objetivo', async (req, res) => {
+  console.log('Requisição recebida em /objetivo:', req.body);
+  const { filho_id, nome, valor_total } = req.body;
+
+  try {
+    if (!filho_id || !nome || !valor_total || valor_total <= 0) {
+      console.log('Dados inválidos:', { filho_id, nome, valor_total });
+      return res.status(400).json({ error: 'Dados inválidos' });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('SET search_path TO banco_infantil');
+      const result = await client.query(
+        `INSERT INTO objetivos (filho_id, nome, valor_total, valor_atual, data_criacao, status)
+         VALUES ($1, $2, $3, 0, CURRENT_TIMESTAMP, 'pendente')
+         RETURNING *`,
+        [filho_id, nome, valor_total]
+      );
+      res.status(200).json({ objetivo: result.rows[0] });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Erro ao criar objetivo:', error.stack);
+    res.status(500).json({ error: 'Erro ao criar objetivo', details: error.message });
+  }
+});
+
+// Endpoint para atualizar objetivo
+router.put('/objetivo/:id', async (req, res) => {
+  console.log('Requisição recebida em /objetivo/:id (PUT):', req.params.id, req.body);
+  const { id } = req.params;
+  const { nome, valor_total, filho_id } = req.body;
+
+  try {
+    if (!nome || !valor_total || valor_total <= 0 || !filho_id) {
+      console.log('Dados inválidos:', { nome, valor_total, filho_id });
+      return res.status(400).json({ error: 'Dados inválidos' });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('SET search_path TO banco_infantil');
+      const result = await client.query(
+        `UPDATE objetivos SET nome = $1, valor_total = $2 WHERE id = $3 AND filho_id = $4 RETURNING *`,
+        [nome, valor_total, id, filho_id]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({ error: 'Objetivo não encontrado' });
+      }
+
+      res.status(200).json({ objetivo: result.rows[0] });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Erro ao atualizar objetivo:', error.stack);
+    res.status(500).json({ error: 'Erro ao atualizar objetivo', details: error.message });
+  }
+});
+
+// Endpoint para buscar objetivo
+router.get('/objetivo/:filho_id', async (req, res) => {
+  console.log('Requisição recebida em /objetivo:', req.params.filho_id);
+  const { filho_id } = req.params;
+
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query('SET search_path TO banco_infantil');
+      const result = await client.query(
+        `SELECT * FROM objetivos WHERE filho_id = $1 AND status = 'pendente' LIMIT 1`,
+        [filho_id]
+      );
+      res.status(200).json({ objetivo: result.rows[0] || null });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Erro ao buscar objetivo:', error.stack);
+    res.status(500).json({ error: 'Erro ao buscar objetivo', details: error.message });
+  }
+});
+
+// Endpoint para penalizar objetivo
+router.put('/objetivo/penalizar', async (req, res) => {
+  console.log('Requisição recebida em /objetivo/penalizar:', req.body);
+  const { filho_id, valor_penalidade } = req.body;
+
+  try {
+    if (!filho_id || !valor_penalidade || valor_penalidade <= 0) {
+      console.log('Dados inválidos:', { filho_id, valor_penalidade });
+      return res.status(400).json({ error: 'Filho ID e valor da penalidade são obrigatórios e devem ser válidos' });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('SET search_path TO banco_infantil');
+      const result = await client.query(
+        `UPDATE objetivos 
+         SET valor_atual = GREATEST(valor_atual - $1, 0) 
+         WHERE filho_id = $2 AND status = 'pendente' 
+         RETURNING *`,
+        [valor_penalidade, filho_id]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({ error: 'Nenhum objetivo pendente encontrado para esta criança' });
+      }
+
+      if (result.rows[0].valor_atual >= result.rows[0].valor_total) {
+        await client.query(
+          `UPDATE objetivos 
+           SET status = 'concluido', data_conclusao = CURRENT_TIMESTAMP 
+           WHERE id = $1`,
+          [result.rows[0].id]
+        );
+        await client.query(
+          'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
+          [filho_id, `Você alcançou seu objetivo "${result.rows[0].nome}"! Parabéns!`, new Date()]
+        );
+      }
+
+      res.status(200).json({ objetivo: result.rows[0], message: 'Progresso do objetivo atualizado' });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Erro ao penalizar objetivo:', error.stack);
+    res.status(500).json({ error: 'Erro ao penalizar objetivo', details: error.message });
+  }
+});
+
+// Endpoint para listar conquistas de uma criança
 router.get('/conquistas/:filhoId', async (req, res) => {
-  console.log('Requisição recebida em /conquistas/:filhoId:', req.params.filhoId);
+  console.log('Requisição recebida em /conquistas:', req.params.filhoId);
   const { filhoId } = req.params;
 
   try {
@@ -1141,10 +1213,10 @@ router.get('/conquistas/:filhoId', async (req, res) => {
     try {
       await client.query('SET search_path TO banco_infantil');
       const result = await client.query(
-        `SELECT id, nome, descricao, icone, recompensa, data_desbloqueio
-         FROM conquistas
+        `SELECT id, data, icone, nome
+         FROM trofeus_diarios
          WHERE filho_id = $1
-         ORDER BY data_desbloqueio DESC`,
+         ORDER BY data DESC`,
         [filhoId]
       );
       res.status(200).json({ conquistas: result.rows });

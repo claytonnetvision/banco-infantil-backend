@@ -1,3 +1,4 @@
+// routes/accountRoutes.js
 const express = require('express');
 const router = express.Router();
 const { pool } = require('../db');
@@ -64,7 +65,6 @@ router.post('/conta/adicionar-saldo', async (req, res) => {
       await client.query('BEGIN');
       await client.query('SET search_path TO banco_infantil');
 
-      // Buscar a conta do responsável
       const contaPaiResult = await client.query('SELECT id, saldo FROM contas WHERE pai_id = $1', [pai_id]);
       if (contaPaiResult.rows.length === 0) {
         await client.query('ROLLBACK');
@@ -72,10 +72,8 @@ router.post('/conta/adicionar-saldo', async (req, res) => {
       }
       const contaId = contaPaiResult.rows[0].id;
 
-      // Adicionar saldo ao responsável
       await client.query('UPDATE contas SET saldo = saldo + $1 WHERE pai_id = $2', [valor, pai_id]);
 
-      // Registrar transação
       const result = await client.query(
         'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ($1, $2, $3, $4, $5) RETURNING id',
         [contaId, 'recebimento', valor, 'Adição de saldo pelo responsável', 'adicao_saldo']
@@ -83,11 +81,13 @@ router.post('/conta/adicionar-saldo', async (req, res) => {
 
       await client.query('COMMIT');
       res.status(201).json({ transacao: result.rows[0], message: 'Saldo adicionado com sucesso!' });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
     } finally {
       client.release();
     }
   } catch (error) {
-    await client.query('ROLLBACK');
     console.error('Erro ao adicionar saldo:', error.stack);
     res.status(500).json({ error: 'Erro ao adicionar saldo', details: error.message });
   }
@@ -116,11 +116,13 @@ router.post('/transacao', async (req, res) => {
       );
       await client.query('COMMIT');
       res.status(201).json({ transacao: result.rows[0], message: 'Transação realizada com sucesso!' });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
     } finally {
       client.release();
     }
   } catch (error) {
-    await client.query('ROLLBACK');
     console.error('Erro na transação:', error.stack);
     res.status(500).json({ error: 'Erro ao realizar transação', details: error.message });
   }
@@ -132,9 +134,9 @@ router.post('/transferencia', async (req, res) => {
   const { pai_id, filho_id, valor, descricao } = req.body;
 
   try {
-    if (!pai_id || !filho_id || !valor) {
+    if (!pai_id || !filho_id || !valor || valor <= 0) {
       console.log('Dados da transferência incompletos');
-      return res.status(400).json({ error: 'Dados da transferência incompletos' });
+      return res.status(400).json({ error: 'Dados da transferência incompletos ou valor inválido' });
     }
 
     const client = await pool.connect();
@@ -142,7 +144,6 @@ router.post('/transferencia', async (req, res) => {
       await client.query('BEGIN');
       await client.query('SET search_path TO banco_infantil');
 
-      // Buscar a conta do responsável
       const contaPaiResult = await client.query('SELECT id, saldo FROM contas WHERE pai_id = $1', [pai_id]);
       if (contaPaiResult.rows.length === 0) {
         await client.query('ROLLBACK');
@@ -151,28 +152,32 @@ router.post('/transferencia', async (req, res) => {
       const contaId = contaPaiResult.rows[0].id;
       const saldoPai = parseFloat(contaPaiResult.rows[0].saldo);
 
-      // Verificar saldo suficiente
       if (saldoPai < valor) {
         await client.query('ROLLBACK');
         return res.status(400).json({ error: 'Saldo insuficiente para a transferência' });
       }
 
-      // Deduzir do responsável
       await client.query('UPDATE contas SET saldo = saldo - $1 WHERE pai_id = $2', [valor, pai_id]);
-      // Adicionar à criança
       await client.query('UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2', [valor, filho_id]);
-      // Registrar transação
       const result = await client.query(
         'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ($1, $2, $3, $4, $5) RETURNING id',
         [contaId, 'transferencia', valor, descricao || `Transferência para criança ${filho_id}`, 'transferencia']
       );
+
+      await client.query(
+        'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
+        [filho_id, `Você recebeu R$ ${valor.toFixed(2)} do seu responsável! ${descricao || ''}`, new Date()]
+      );
+
       await client.query('COMMIT');
       res.status(201).json({ transacao: result.rows[0], message: 'Transferência realizada com sucesso!' });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
     } finally {
       client.release();
     }
   } catch (error) {
-    await client.query('ROLLBACK');
     console.error('Erro na transferência:', error.stack);
     res.status(500).json({ error: 'Erro ao realizar transferência', details: error.message });
   }
@@ -184,7 +189,7 @@ router.post('/transferencia/externa', async (req, res) => {
   const { pai_id, chave_pix, valor, descricao } = req.body;
 
   try {
-    if (!pai_id || !chave_pix || !valor) {
+    if (!pai_id || !chave_pix || !valor || valor <= 0) {
       console.log('Dados da transferência incompleta');
       return res.status(400).json({ error: 'Dados da transferência incompleta: ID do responsável, chave PIX e valor são obrigatórios' });
     }
@@ -194,7 +199,6 @@ router.post('/transferencia/externa', async (req, res) => {
       await client.query('BEGIN');
       await client.query('SET search_path TO banco_infantil');
 
-      // Buscar a conta do responsável
       const contaPaiResult = await client.query('SELECT id, saldo FROM contas WHERE pai_id = $1', [pai_id]);
       if (contaPaiResult.rows.length === 0) {
         await client.query('ROLLBACK');
@@ -203,26 +207,25 @@ router.post('/transferencia/externa', async (req, res) => {
       const contaId = contaPaiResult.rows[0].id;
       const saldoPai = parseFloat(contaPaiResult.rows[0].saldo);
 
-      // Verificar saldo suficiente
       if (saldoPai < valor) {
         await client.query('ROLLBACK');
         return res.status(400).json({ error: 'Saldo insuficiente para a transferência' });
       }
 
-      // Deduzir do responsável
       await client.query('UPDATE contas SET saldo = saldo - $1 WHERE pai_id = $2', [valor, pai_id]);
-      // Registrar transação
       const result = await client.query(
         'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ($1, $2, $3, $4, $5) RETURNING id',
         [contaId, 'pix_externo', valor, descricao || `Pix para ${chave_pix}`, 'pix_externo']
       );
       await client.query('COMMIT');
       res.status(201).json({ transacao: result.rows[0], message: 'Pix enviado com sucesso!' });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
     } finally {
       client.release();
     }
   } catch (error) {
-    await client.query('ROLLBACK');
     console.error('Erro na transferência externa:', error.stack);
     res.status(500).json({ error: 'Erro ao realizar transferência externa', details: error.message });
   }
@@ -234,9 +237,9 @@ router.post('/penalizar', async (req, res) => {
   const { pai_id, filho_id, valor, motivo } = req.body;
 
   try {
-    if (!pai_id || !filho_id || !valor || !motivo) {
+    if (!pai_id || !filho_id || !valor || valor <= 0 || !motivo) {
       console.log('Dados da penalidade incompletos');
-      return res.status(400).json({ error: 'Dados da penalidade incompletos' });
+      return res.status(400).json({ error: 'Dados da penalidade incompletos ou inválidos' });
     }
 
     const client = await pool.connect();
@@ -245,12 +248,13 @@ router.post('/penalizar', async (req, res) => {
       await client.query('SET search_path TO banco_infantil');
 
       // Verificar saldo da criança
-      const contaFilhoResult = await client.query('SELECT saldo FROM contas_filhos WHERE filho_id = $1', [filho_id]);
+      const contaFilhoResult = await client.query('SELECT id, saldo FROM contas_filhos WHERE filho_id = $1', [filho_id]);
       if (contaFilhoResult.rows.length === 0) {
         await client.query('ROLLBACK');
         return res.status(404).json({ error: 'Conta da criança não encontrada' });
       }
       const saldoFilho = parseFloat(contaFilhoResult.rows[0].saldo);
+      const contaFilhoId = contaFilhoResult.rows[0].id;
 
       if (saldoFilho < valor) {
         await client.query('ROLLBACK');
@@ -263,31 +267,33 @@ router.post('/penalizar', async (req, res) => {
         await client.query('ROLLBACK');
         return res.status(404).json({ error: 'Conta do responsável não encontrada' });
       }
-      const contaId = contaPaiResult.rows[0].id;
+      const contaPaiId = contaPaiResult.rows[0].id;
 
       // Deduzir da criança
       await client.query('UPDATE contas_filhos SET saldo = saldo - $1 WHERE filho_id = $2', [valor, filho_id]);
       // Adicionar ao responsável
       await client.query('UPDATE contas SET saldo = saldo + $1 WHERE pai_id = $2', [valor, pai_id]);
-      // Registrar transação
+      // Registrar transação na conta da criança
       const result = await client.query(
         'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ($1, $2, $3, $4, $5) RETURNING id',
-        [contaId, 'penalidade', valor, `Penalidade para criança ${filho_id}: ${motivo}`, 'penalidade']
+        [contaFilhoId, 'penalidade', -valor, `Penalidade: ${motivo}`, 'penalidade']
       );
 
       // Adicionar notificação para a criança
       await client.query(
         'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
-        [filho_id, `Você foi penalizado pelo seu responsável e perdeu R$ ${valor.toFixed(2)}. Motivo: ${motivo}`, new Date()]
+        [filho_id, `Você perdeu R$ ${valor.toFixed(2)} devido a uma penalidade. Motivo: ${motivo}`, new Date()]
       );
 
       await client.query('COMMIT');
       res.status(201).json({ transacao: result.rows[0], message: 'Penalidade aplicada com sucesso!' });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
     } finally {
       client.release();
     }
   } catch (error) {
-    await client.query('ROLLBACK');
     console.error('Erro na penalidade:', error.stack);
     res.status(500).json({ error: 'Erro ao aplicar penalidade', details: error.message });
   }
@@ -344,10 +350,15 @@ router.get('/transacoes/historico/filho/:filhoId', async (req, res) => {
       const result = await client.query(
         `SELECT t.id, t.conta_id, t.tipo, t.valor, t.descricao, t.data_criacao, t.origem
          FROM transacoes t
+         JOIN contas_filhos cf ON t.conta_id = cf.id
+         WHERE cf.filho_id = $1
+         UNION
+         SELECT t.id, t.conta_id, t.tipo, t.valor, t.descricao, t.data_criacao, t.origem
+         FROM transacoes t
          JOIN contas c ON t.conta_id = c.id
-         JOIN filhos f ON f.pai_id = c.pai_id
-         WHERE f.id = $1 AND t.descricao LIKE '%' || f.id || '%'
-         ORDER BY t.data_criacao DESC
+         WHERE t.descricao LIKE '%' || $1 || '%'
+         AND t.tipo = 'penalidade'
+         ORDER BY data_criacao DESC
          LIMIT 50`,
         [filhoId]
       );
@@ -382,9 +393,8 @@ router.get('/transacoes/tarefas/:filhoId', async (req, res) => {
       const result = await client.query(
         `SELECT t.id, t.descricao, t.valor, t.data_criacao as data
          FROM transacoes t
-         JOIN contas c ON t.conta_id = c.id
-         JOIN filhos f ON f.pai_id = c.pai_id
-         WHERE f.id = $1 AND t.origem = $2
+         JOIN contas_filhos cf ON t.conta_id = cf.id
+         WHERE cf.filho_id = $1 AND t.origem = $2
          ORDER BY t.data_criacao DESC
          LIMIT 7`,
         [filhoId, 'tarefa']
@@ -445,7 +455,6 @@ router.post('/jogo/campo-minado/vitoria', async (req, res) => {
       await client.query('BEGIN');
       await client.query('SET search_path TO banco_infantil');
 
-      // Verificar conta do responsável
       const contaPaiResult = await client.query('SELECT id, saldo FROM contas WHERE pai_id = $1', [pai_id]);
       if (contaPaiResult.rows.length === 0) {
         await client.query('ROLLBACK');
@@ -460,17 +469,13 @@ router.post('/jogo/campo-minado/vitoria', async (req, res) => {
         return res.status(400).json({ error: 'Saldo insuficiente para conceder recompensa' });
       }
 
-      // Deduzir do responsável
       await client.query('UPDATE contas SET saldo = saldo - $1 WHERE pai_id = $2', [recompensa, pai_id]);
-      // Adicionar à criança
       await client.query('UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2', [recompensa, filho_id]);
-      // Registrar transação
       await client.query(
         'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ($1, $2, $3, $4, $5)',
         [contaId, 'transferencia', recompensa, 'Recompensa por vitória no Campo Minado', 'jogo_campo_minado']
       );
 
-      // Adicionar notificação
       await client.query(
         'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
         [filho_id, `Você ganhou R$ ${recompensa.toFixed(2)} por vencer no Campo Minado!`, new Date()]
@@ -478,11 +483,13 @@ router.post('/jogo/campo-minado/vitoria', async (req, res) => {
 
       await client.query('COMMIT');
       res.status(200).json({ message: 'Vitória registrada! Recompensa concedida.' });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
     } finally {
       client.release();
     }
   } catch (error) {
-    await client.query('ROLLBACK');
     console.error('Erro ao registrar vitória:', error.stack);
     res.status(500).json({ error: 'Erro ao registrar vitória', details: error.message });
   }
@@ -504,7 +511,6 @@ router.post('/jogo/memoria/vitoria', async (req, res) => {
       await client.query('BEGIN');
       await client.query('SET search_path TO banco_infantil');
 
-      // Verificar conta do responsável
       const contaPaiResult = await client.query('SELECT id, saldo FROM contas WHERE pai_id = $1', [pai_id]);
       if (contaPaiResult.rows.length === 0) {
         await client.query('ROLLBACK');
@@ -519,23 +525,18 @@ router.post('/jogo/memoria/vitoria', async (req, res) => {
         return res.status(400).json({ error: 'Saldo insuficiente para conceder recompensa' });
       }
 
-      // Deduzir do responsável
       await client.query('UPDATE contas SET saldo = saldo - $1 WHERE pai_id = $2', [recompensa, pai_id]);
-      // Adicionar à criança
       await client.query('UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2', [recompensa, filho_id]);
-      // Registrar transação
       await client.query(
         'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ($1, $2, $3, $4, $5)',
         [contaId, 'transferencia', recompensa, 'Recompensa por vitória no Jogo da Memória', 'jogo_memoria']
       );
 
-      // Adicionar notificação
       await client.query(
         'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
         [filho_id, `Você ganhou R$ ${recompensa.toFixed(2)} por vencer no Jogo da Memória!`, new Date()]
       );
 
-      // Verificar conquista "Primeiro Jogo da Memória"
       const conquistaResult = await client.query(
         `SELECT id FROM conquistas WHERE filho_id = $1 AND nome = $2`,
         [filho_id, 'Primeiro Jogo da Memória']
@@ -568,11 +569,13 @@ router.post('/jogo/memoria/vitoria', async (req, res) => {
 
       await client.query('COMMIT');
       res.status(200).json({ message: 'Vitória registrada! Recompensa concedida.' });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
     } finally {
       client.release();
     }
   } catch (error) {
-    await client.query('ROLLBACK');
     console.error('Erro ao registrar vitória:', error.stack);
     res.status(500).json({ error: 'Erro ao registrar vitória', details: error.message });
   }
