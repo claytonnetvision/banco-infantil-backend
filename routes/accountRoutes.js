@@ -238,7 +238,7 @@ router.post('/penalizar', async (req, res) => {
 
   try {
     if (!pai_id || !filho_id || !valor || valor <= 0 || !motivo) {
-      console.log('Dados da penalidade incompletos');
+      console.log('Dados da penalidade incompletos:', { pai_id, filho_id, valor, motivo });
       return res.status(400).json({ error: 'Dados da penalidade incompletos ou inválidos' });
     }
 
@@ -251,13 +251,16 @@ router.post('/penalizar', async (req, res) => {
       const contaFilhoResult = await client.query('SELECT id, saldo FROM contas_filhos WHERE filho_id = $1', [filho_id]);
       if (contaFilhoResult.rows.length === 0) {
         await client.query('ROLLBACK');
+        console.log('Conta da criança não encontrada para filho_id:', filho_id);
         return res.status(404).json({ error: 'Conta da criança não encontrada' });
       }
       const saldoFilho = parseFloat(contaFilhoResult.rows[0].saldo);
       const contaFilhoId = contaFilhoResult.rows[0].id;
+      console.log('Conta da criança encontrada:', { contaFilhoId, saldoFilho });
 
       if (saldoFilho < valor) {
         await client.query('ROLLBACK');
+        console.log('Saldo insuficiente na criança:', { saldoFilho, valor });
         return res.status(400).json({ error: 'Saldo insuficiente na criança para a penalidade' });
       }
 
@@ -265,36 +268,46 @@ router.post('/penalizar', async (req, res) => {
       const contaPaiResult = await client.query('SELECT id FROM contas WHERE pai_id = $1', [pai_id]);
       if (contaPaiResult.rows.length === 0) {
         await client.query('ROLLBACK');
+        console.log('Conta do responsável não encontrada para pai_id:', pai_id);
         return res.status(404).json({ error: 'Conta do responsável não encontrada' });
       }
       const contaPaiId = contaPaiResult.rows[0].id;
+      console.log('Conta do responsável encontrada:', { contaPaiId });
 
       // Deduzir da criança
       await client.query('UPDATE contas_filhos SET saldo = saldo - $1 WHERE filho_id = $2', [valor, filho_id]);
+      console.log('Saldo deduzido da criança:', { filho_id, valor });
+
       // Adicionar ao responsável
       await client.query('UPDATE contas SET saldo = saldo + $1 WHERE pai_id = $2', [valor, pai_id]);
-      // Registrar transação na conta da criança
+      console.log('Saldo adicionado ao responsável:', { pai_id, valor });
+
+      // Registrar transação na conta do responsável (alinhado com outros endpoints)
+      console.log('Inserindo transação com contaPaiId:', contaPaiId);
       const result = await client.query(
         'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ($1, $2, $3, $4, $5) RETURNING id',
-        [contaFilhoId, 'penalidade', -valor, `Penalidade: ${motivo}`, 'penalidade']
+        [contaPaiId, 'penalidade', -valor, `Penalidade aplicada à criança ${filho_id}: ${motivo}`, 'penalidade']
       );
+      console.log('Transação inserida:', result.rows[0]);
 
       // Adicionar notificação para a criança
       await client.query(
         'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
         [filho_id, `Você perdeu R$ ${valor.toFixed(2)} devido a uma penalidade. Motivo: ${motivo}`, new Date()]
       );
+      console.log('Notificação inserida para filho_id:', filho_id);
 
       await client.query('COMMIT');
       res.status(201).json({ transacao: result.rows[0], message: 'Penalidade aplicada com sucesso!' });
     } catch (error) {
       await client.query('ROLLBACK');
-      throw error;
+      console.error('Erro na penalidade:', { message: error.message, stack: error.stack });
+      res.status(500).json({ error: 'Erro ao aplicar penalidade', details: error.message });
     } finally {
-      client.release();
+      if (client) client.release();
     }
   } catch (error) {
-    console.error('Erro na penalidade:', error.stack);
+    console.error('Erro na penalidade:', { message: error.message, stack: error.stack });
     res.status(500).json({ error: 'Erro ao aplicar penalidade', details: error.message });
   }
 });
