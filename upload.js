@@ -1,3 +1,5 @@
+
+// C:\Users\CentralIT\Documents\Pessoal\Projetos\BANCO\banco-infantil-backend\upload.js
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -13,7 +15,7 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ 
   storage,
-  limits: { fileSize: 2 * 1024 * 1024 }, // 2MB
+  limits: { fileSize: 5 * 1024 * 1024 }, // Alterado para 5MB
   fileFilter: (req, file, cb) => {
     const filetypes = /jpeg|jpg|png/;
     const extname = filetypes.test(path.extname(file.originalname).toLowerCase());

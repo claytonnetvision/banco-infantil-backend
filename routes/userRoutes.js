@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { pool } = require('../db');
+const multer = require('multer');
 const { upload } = require('../upload');
 
 // Middleware para tratar erros do Multer
@@ -285,7 +286,7 @@ router.get('/filho/:filhoId', async (req, res) => {
 
 // Endpoint para excluir perfil da criança
 router.delete('/filho/:filhoId', async (req, res) => {
-  console.log('Requisição recebida em /filho/:filhoId (DELETE):', req.params.filhoId);
+  console.log('Requisição recebida em /filho/:filhoId (DELETE):', req.params.filhoId, req.body);
   const { filhoId } = req.params;
   const { pai_id } = req.body;
 
@@ -322,6 +323,8 @@ router.delete('/filho/:filhoId', async (req, res) => {
       await client.query('DELETE FROM tentativas_desafios WHERE filho_id = $1', [filhoId]);
       await client.query('DELETE FROM notificacoes WHERE filho_id = $1', [filhoId]);
       await client.query('DELETE FROM mesadas WHERE filho_id = $1', [filhoId]);
+      await client.query('DELETE FROM missoes_personalizadas WHERE filho_id = $1', [filhoId]);
+      await client.query('DELETE FROM perguntas_gerados_ia WHERE filho_id = $1', [filhoId]);
 
       // Excluir a criança
       await client.query('DELETE FROM filhos WHERE id = $1', [filhoId]);
@@ -329,13 +332,64 @@ router.delete('/filho/:filhoId', async (req, res) => {
       await client.query('COMMIT');
       console.log('Perfil da criança excluído com sucesso:', { filhoId });
       res.status(200).json({ message: 'Perfil da criança excluído com sucesso' });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error('Erro ao excluir perfil da criança:', error.stack);
+      res.status(500).json({ error: 'Erro ao excluir perfil da criança', details: error.message });
     } finally {
       client.release();
     }
   } catch (error) {
-    await client.query('ROLLBACK');
-    console.error('Erro ao excluir perfil da criança:', error.stack);
-    res.status(500).json({ error: 'Erro ao excluir perfil da criança', details: error.message });
+    console.error('Erro ao conectar ao banco:', error.stack);
+    res.status(500).json({ error: 'Erro ao conectar ao banco', details: error.message });
+  }
+});
+
+// Endpoint para limpar dados da criança
+router.delete('/admin/limpar-dados/:filhoId', async (req, res) => {
+  console.log('Requisição recebida em /admin/limpar-dados/:filhoId:', req.params.filhoId);
+  const { filhoId } = req.params;
+
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SET search_path TO banco_infantil');
+
+      // Verificar se a criança existe
+      const filhoResult = await client.query('SELECT id FROM filhos WHERE id = $1', [parseInt(filhoId)]);
+      if (filhoResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        console.log('Criança não encontrada:', { filhoId });
+        return res.status(404).json({ error: 'Criança não encontrada' });
+      }
+
+      // Excluir dados associados
+      await client.query('DELETE FROM tarefas WHERE filho_id = $1', [filhoId]);
+      await client.query('DELETE FROM tarefas_automaticas WHERE filho_id = $1', [filhoId]);
+      await client.query('DELETE FROM missoes_diarias WHERE filho_id = $1', [filhoId]);
+      await client.query('DELETE FROM perguntas_gerados_ia WHERE filho_id = $1', [filhoId]);
+      await client.query('DELETE FROM respostas_desafios WHERE crianca_id = $1', [filhoId]);
+      await client.query('DELETE FROM conjuntos_desafios WHERE filho_id = $1', [filhoId]);
+      await client.query('DELETE FROM desafios_matematicos WHERE filho_id = $1', [filhoId]);
+      await client.query('DELETE FROM tentativas_desafios WHERE filho_id = $1', [filhoId]);
+      await client.query('DELETE FROM notificacoes WHERE filho_id = $1', [filhoId]);
+      await client.query('DELETE FROM mesadas WHERE filho_id = $1', [filhoId]);
+      await client.query('DELETE FROM missoes_personalizadas WHERE filho_id = $1', [filhoId]);
+
+      await client.query('COMMIT');
+      console.log('Dados da criança limpos com sucesso:', { filhoId });
+      res.status(200).json({ message: 'Dados limpos com sucesso!' });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error('Erro ao limpar dados:', error.stack);
+      res.status(500).json({ error: 'Erro ao limpar dados', details: error.message });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Erro ao conectar ao banco:', error.stack);
+    res.status(500).json({ error: 'Erro ao conectar ao banco', details: error.message });
   }
 });
 

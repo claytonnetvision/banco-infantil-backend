@@ -10,6 +10,10 @@ router.post('/configurar/:filhoId', async (req, res) => {
     const { tipo_desafio, idade, quantidade_perguntas, remunerado, valor_recompensa, gerar_diariamente, dificuldade } = req.body;
     const { filhoId } = req.params;
 
+    if (!req.headers.authorization) {
+      return res.status(401).json({ error: 'Não autorizado' });
+    }
+
     if (!['matematica', 'historia', 'portugues', 'geografia', 'educacao_financeira', 'mundo', 'conhecimentos_gerais', 'fisica_criancas'].includes(tipo_desafio)) {
       return res.status(400).json({ error: 'Tipo de desafio inválido' });
     }
@@ -19,7 +23,7 @@ router.post('/configurar/:filhoId', async (req, res) => {
     }
 
     if (quantidade_perguntas < 1 || quantidade_perguntas > 50) {
-      return res.status(400).json({ error: 'Quantidade de perguntas deve estar entre 1 e 50' });
+      return res.status(400).json({ error: 'Quantidade de perguntas inválida' });
     }
 
     if (remunerado && (!valor_recompensa || valor_recompensa <= 0)) {
@@ -61,29 +65,37 @@ router.post('/configurar/:filhoId', async (req, res) => {
     await client.query('BEGIN');
 
     const desafioResult = await client.query(
-      `INSERT INTO desafios_gerados_ia (pai_id, filho_id, tipo_desafio, idade, quantidade_perguntas, remunerado, valor_recompensa, gerar_diariamente, dificuldade)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `INSERT INTO desafios_gerados_ia (pai_id, filho_id, tipo_desafio, idade, quantidade_perguntas, remunerado, valor_recompensa, gerar_diariamente, dificuldade, criado_em)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP)
        RETURNING id`,
       [paiId, filhoId, tipo_desafio, idade, quantidade_perguntas, remunerado, valor_recompensa, gerar_diariamente, dificuldade]
     );
 
     const desafioId = desafioResult.rows[0].id;
-    const dataExpiracao = new Date();
-    dataExpiracao.setDate(dataExpiracao.getDate() + 1);
-    dataExpiracao.setHours(0, 0, 0, 0);
 
     for (const pergunta of perguntas) {
+      const opcoesArray = Array.isArray(pergunta.opcoes)
+        ? pergunta.opcoes.map(opcao => typeof opcao === 'object' && opcao.texto ? opcao.texto : opcao)
+        : [];
+      console.log('Inserindo pergunta:', {
+        desafio_id: desafioId,
+        filho_id: filhoId,
+        pergunta: pergunta.pergunta,
+        opcoes: opcoesArray,
+        resposta_correta: pergunta.resposta_correta,
+        explicacao: pergunta.explicacao
+      });
       await client.query(
-        `INSERT INTO perguntas_gerados_ia (desafio_id, filho_id, pergunta, opcoes, resposta_correta, explicacao, data_expiracao)
+        `INSERT INTO perguntas_gerados_ia (desafio_id, filho_id, pergunta, opcoes, resposta_correta, explicacao, status)
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
         [
           desafioId,
           filhoId,
           pergunta.pergunta,
-          JSON.stringify(pergunta.opcoes),
+          opcoesArray, // Enviar diretamente como array PostgreSQL
           pergunta.resposta_correta,
           pergunta.explicacao,
-          dataExpiracao
+          'pendente'
         ]
       );
     }
@@ -101,7 +113,107 @@ router.post('/configurar/:filhoId', async (req, res) => {
       await client.query('ROLLBACK');
     }
     console.error('Erro ao configurar desafio IA:', error);
-    res.status(500).json({ error: error.message || 'Erro ao configurar desafio IA' });
+    res.status(500).json({ error: 'Erro ao configurar desafio IA', details: error.message });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+router.post('/automatico/:filhoId', async (req, res) => {
+  console.log('Requisição recebida em /desafios/ia/automatico/:filhoId:', req.params.filhoId);
+  let client;
+  try {
+    const { filhoId } = req.params;
+
+    if (!req.headers.authorization) {
+      return res.status(401).json({ error: 'Não autorizado' });
+    }
+
+    client = await pool.connect();
+    await client.query('SET search_path TO banco_infantil');
+
+    const filhoResult = await client.query('SELECT id, pai_id, idade FROM filhos WHERE id = $1', [filhoId]);
+    if (filhoResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Filho não encontrado' });
+    }
+    const { pai_id, idade } = filhoResult.rows[0];
+
+    const configResult = await client.query(
+      'SELECT tipo_desafio, quantidade_perguntas, remunerado, valor_recompensa, dificuldade FROM desafios_gerados_ia WHERE filho_id = $1 AND gerar_diariamente = true LIMIT 1',
+      [filhoId]
+    );
+    if (configResult.rows.length === 0) {
+      return res.status(400).json({ error: 'Nenhuma configuração de desafio automático encontrada' });
+    }
+    const { tipo_desafio, quantidade_perguntas, remunerado, valor_recompensa, dificuldade } = configResult.rows[0];
+
+    const existingChallenge = await client.query(
+      'SELECT id FROM desafios_gerados_ia WHERE filho_id = $1 AND DATE(criado_em) = CURRENT_DATE AND gerar_diariamente = true',
+      [filhoId]
+    );
+    if (existingChallenge.rows.length > 0) {
+      return res.status(400).json({ error: 'Já existe um desafio automático para hoje' });
+    }
+
+    const perguntas = await gerarPerguntas({
+      tipoDesafio: tipo_desafio,
+      idade: parseInt(idade),
+      quantidade: parseInt(quantidade_perguntas),
+      dificuldade
+    });
+
+    await client.query('BEGIN');
+
+    const desafioResult = await client.query(
+      `INSERT INTO desafios_gerados_ia (pai_id, filho_id, tipo_desafio, idade, quantidade_perguntas, remunerado, valor_recompensa, gerar_diariamente, dificuldade, criado_em)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP)
+       RETURNING id`,
+      [pai_id, filhoId, tipo_desafio, idade, quantidade_perguntas, remunerado, valor_recompensa, true, dificuldade]
+    );
+
+    const desafioId = desafioResult.rows[0].id;
+
+    for (const pergunta of perguntas) {
+      const opcoesArray = Array.isArray(pergunta.opcoes)
+        ? pergunta.opcoes.map(opcao => typeof opcao === 'object' && opcao.texto ? opcao.texto : opcao)
+        : [];
+      console.log('Inserindo pergunta automática:', {
+        desafio_id: desafioId,
+        filho_id: filhoId,
+        pergunta: pergunta.pergunta,
+        opcoes: opcoesArray,
+        resposta_correta: pergunta.resposta_correta,
+        explicacao: pergunta.explicacao
+      });
+      await client.query(
+        `INSERT INTO perguntas_gerados_ia (desafio_id, filho_id, pergunta, opcoes, resposta_correta, explicacao, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          desafioId,
+          filhoId,
+          pergunta.pergunta,
+          opcoesArray, // Enviar diretamente como array PostgreSQL
+          pergunta.resposta_correta,
+          pergunta.explicacao,
+          'pendente'
+        ]
+      );
+    }
+
+    await client.query(
+      'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
+      [filhoId, `Novo desafio automático de ${tipo_desafio} (${dificuldade}) disponível!`, new Date()]
+    );
+
+    await client.query('COMMIT');
+
+    res.status(201).json({ message: 'Desafio automático IA criado com sucesso' });
+  } catch (error) {
+    if (client) {
+      await client.query('ROLLBACK');
+    }
+    console.error('Erro ao criar desafio automático IA:', error);
+    res.status(500).json({ error: 'Erro ao criar desafio automático IA', details: error.message });
   } finally {
     if (client) client.release();
   }
@@ -111,6 +223,11 @@ router.get('/perguntas/:filhoId', async (req, res) => {
   let client;
   try {
     const { filhoId } = req.params;
+
+    if (!req.headers.authorization) {
+      return res.status(401).json({ error: 'Não autorizado' });
+    }
+
     client = await pool.connect();
     await client.query('SET search_path TO banco_infantil');
 
@@ -118,7 +235,7 @@ router.get('/perguntas/:filhoId', async (req, res) => {
       `SELECT p.id, p.pergunta, p.opcoes, p.status, d.remunerado, d.valor_recompensa, d.dificuldade
        FROM perguntas_gerados_ia p
        JOIN desafios_gerados_ia d ON p.desafio_id = d.id
-       WHERE p.filho_id = $1 AND p.status = 'pendente' AND p.data_expiracao > CURRENT_TIMESTAMP`,
+       WHERE p.filho_id = $1 AND p.status = 'pendente'`,
       [filhoId]
     );
 
@@ -137,6 +254,10 @@ router.post('/pergunta/:perguntaId/responder', async (req, res) => {
   try {
     const { perguntaId } = req.params;
     const { filho_id, resposta } = req.body;
+
+    if (!req.headers.authorization) {
+      return res.status(401).json({ error: 'Não autorizado' });
+    }
 
     if (!Number.isInteger(resposta) || resposta < 0 || resposta > 3) {
       console.log('Resposta inválida:', { resposta });
@@ -185,7 +306,6 @@ router.post('/pergunta/:perguntaId/responder', async (req, res) => {
     let desafioCompleto = false;
     let todasCorretas = true;
 
-    // Verificar progresso do desafio
     const respostasDesafio = await client.query(
       `SELECT COUNT(*) AS total_respondidas, SUM(CASE WHEN correta THEN 1 ELSE 0 END) AS acertos
        FROM respostas_perguntas_ia r
@@ -230,20 +350,19 @@ router.post('/pergunta/:perguntaId/responder', async (req, res) => {
           return res.status(400).json({ error: 'Saldo insuficiente do responsável' });
         }
 
-        const contaFilhoResult = await client.query('SELECT id FROM contas_filhos WHERE filho_id = $1', [filho_id]);
-        if (contaFilhoResult.rows.length === 0) {
-          await client.query('ROLLBACK');
-          console.log('Conta da criança não encontrada:', { filho_id });
-          return res.status(404).json({ error: 'Conta da criança não encontrada' });
-        }
+        await client.query(
+          'UPDATE contas SET saldo = saldo - $1 WHERE pai_id = $2',
+          [valorRecompensa, pergunta.pai_id]
+        );
 
-        const contaFilhoId = contaFilhoResult.rows[0].id;
+        await client.query(
+          'UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2',
+          [valorRecompensa, filho_id]
+        );
 
-        await client.query('UPDATE contas SET saldo = saldo - $1 WHERE id = $2', [valorRecompensa, contaPaiId]);
-        await client.query('UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2', [valorRecompensa, filho_id]);
         await client.query(
           'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ($1, $2, $3, $4, $5)',
-          [contaFilhoId, 'recebimento', valorRecompensa, `Recompensa por desafio IA`, 'desafio_ia']
+          [contaPaiId, 'transferencia', valorRecompensa, `Recompensa por desafio IA`, 'desafio_ia']
         );
 
         await client.query(
@@ -268,7 +387,7 @@ router.post('/pergunta/:perguntaId/responder', async (req, res) => {
       message: correta ? 'Resposta correta!' : 'Resposta incorreta.',
       correta,
       resposta_correta: pergunta.resposta_correta,
-      resposta_correta_texto: pergunta.opcoes[pergunta.resposta_correta].texto,
+      resposta_correta_texto: pergunta.opcoes[pergunta.resposta_correta],
       explicacao: pergunta.explicacao,
       recompensa,
       desafio_completo: desafioCompleto,

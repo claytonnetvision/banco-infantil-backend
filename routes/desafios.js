@@ -60,7 +60,7 @@ async function buscarDesafios(tipoDesafios) {
           id: String(pergunta.id),
           tipo: 'educacao_financeira',
           pergunta: pergunta.pergunta,
-          opcoes: pergunta.opcoes,
+          opcoes: pergunta.opcoes, // Mantém como array de strings
           resposta_correta: pergunta.resposta_correta,
           explicacao: pergunta.explicacao
         });
@@ -112,8 +112,76 @@ async function buscarDesafios(tipoDesafios) {
   }
 }
 
+// Endpoint para listar desafios pendentes de um filho
+router.get('/crianca/:filhoId', async (req, res) => {
+  console.log('Requisição recebida em /desafios/crianca/:filhoId:', req.params.filhoId);
+  const { filhoId } = req.params;
+
+  if (!req.headers.authorization) {
+    return res.status(401).json({ error: 'Não autorizado' });
+  }
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('SET search_path TO banco_infantil');
+
+    const filhoResult = await client.query('SELECT id FROM filhos WHERE id = $1', [parseInt(filhoId)]);
+    if (filhoResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Criança não encontrada' });
+    }
+
+    const desafiosMatematicos = await client.query(
+      `SELECT id, tipo, pergunta, valor, resposta_correta, status 
+       FROM desafios_matematicos 
+       WHERE filho_id = $1 AND status = 'pendente'
+       ORDER BY data_criacao DESC`,
+      [parseInt(filhoId)]
+    );
+
+    const conjuntosDesafios = await client.query(
+      `SELECT id, tipos, perguntas, valor_recompensa, status, automatico 
+       FROM conjuntos_desafios 
+       WHERE filho_id = $1 AND status = 'pendente'
+       ORDER BY criado_em DESC`,
+      [parseInt(filhoId)]
+    );
+
+    const desafios = {
+      matematica: desafiosMatematicos.rows.map(row => ({
+        id: row.id,
+        tipo: row.tipo,
+        pergunta: row.pergunta,
+        valor: parseFloat(row.valor) || 0,
+        resposta_correta: parseFloat(row.resposta_correta),
+        status: row.status
+      })),
+      conjuntos: conjuntosDesafios.rows.map(row => ({
+        id: row.id,
+        tipos: typeof row.tipos === 'string' ? (row.tipos ? JSON.parse(row.tipos) : {}) : row.tipos || {},
+        perguntas: typeof row.perguntas === 'string' ? (row.perguntas ? JSON.parse(row.perguntas) : []) : row.perguntas || [],
+        valor_recompensa: parseFloat(row.valor_recompensa) || 0,
+        status: row.status,
+        automatico: row.automatico
+      }))
+    };
+
+    console.log('Desafios encontrados para filhoId:', filhoId, desafios);
+    res.status(200).json({ desafios, sucesso: true });
+  } catch (error) {
+    console.error('Erro ao buscar desafios para criança:', error.stack);
+    res.status(200).json({ desafios: { matematica: [], conjuntos: [] }, sucesso: true });
+  } finally {
+    if (client) client.release();
+  }
+});
+
 // Endpoint para gerar perguntas por tipo e quantidade
 router.get('/gerar/:tipo/:quantidade', async (req, res) => {
+  if (!req.headers.authorization) {
+    return res.status(401).json({ error: 'Não autorizado' });
+  }
+
   const { tipo, quantidade } = req.params;
   const qtd = parseInt(quantidade);
 
@@ -159,6 +227,10 @@ router.get('/gerar/:tipo/:quantidade', async (req, res) => {
 router.post('/conjunto', async (req, res) => {
   console.log('Requisição recebida em /desafios/conjunto:', JSON.stringify(req.body, null, 2));
   const { pai_id, filho_id, tipo_desafios, valor_recompensa } = req.body;
+
+  if (!req.headers.authorization) {
+    return res.status(401).json({ error: 'Não autorizado' });
+  }
 
   let client;
   try {
@@ -277,7 +349,6 @@ router.post('/conjunto', async (req, res) => {
       [pai_id, filho_id, JSON.stringify(tipo_desafios), JSON.stringify(perguntas), valor_recompensa, 'pendente', false]
     );
 
-    // Enviar notificação para a criança
     await client.query(
       'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
       [filho_id, `Novo conjunto de desafios criado pelo seu responsável!`, new Date()]
@@ -308,6 +379,11 @@ router.post('/conjunto', async (req, res) => {
 router.post('/automatico/:filhoId', async (req, res) => {
   console.log('Requisição recebida em /desafios/automatico/:filhoId:', req.params.filhoId);
   const { filhoId } = req.params;
+
+  if (!req.headers.authorization) {
+    return res.status(401).json({ error: 'Não autorizado' });
+  }
+
   let client;
   try {
     client = await pool.connect();
@@ -351,56 +427,62 @@ router.post('/automatico/:filhoId', async (req, res) => {
 
     const perguntas = [];
 
-    const perguntasFinanceira = await getRandomPerguntas(
-      filhoId,
-      'educacao_financeira',
-      tipo_desafios.educacao_financeira,
-      PERGUNTAS_EDUCACAO_FINANCEIRA
-    );
-    perguntasFinanceira.forEach(pergunta => {
-      perguntas.push({
-        id: String(pergunta.id),
-        tipo: 'educacao_financeira',
-        pergunta: pergunta.pergunta,
-        opcoes: pergunta.opcoes,
-        resposta_correta: pergunta.resposta_correta,
-        explicacao: pergunta.explicacao
+    if (tipo_desafios.educacao_financeira > 0) {
+      const perguntasFinanceira = await getRandomPerguntas(
+        filhoId,
+        'educacao_financeira',
+        tipo_desafios.educacao_financeira,
+        PERGUNTAS_EDUCACAO_FINANCEIRA
+      );
+      perguntasFinanceira.forEach(pergunta => {
+        perguntas.push({
+          id: String(pergunta.id),
+          tipo: 'educacao_financeira',
+          pergunta: pergunta.pergunta,
+          opcoes: pergunta.opcoes, // Já é array de strings
+          resposta_correta: pergunta.resposta_correta,
+          explicacao: pergunta.explicacao
+        });
       });
-    });
+    }
 
-    const perguntasOrtografia = await getRandomPerguntas(
-      filhoId,
-      'ortografia',
-      tipo_desafios.ortografia,
-      PERGUNTAS_ORTOGRAFIA
-    );
-    perguntasOrtografia.forEach(pergunta => {
-      perguntas.push({
-        id: String(pergunta.id),
-        tipo: 'ortografia',
-        pergunta: pergunta.pergunta,
-        opcoes: pergunta.opcoes,
-        resposta_correta: pergunta.resposta_correta,
-        explicacao: pergunta.explicacao
+    if (tipo_desafios.ortografia > 0) {
+      const perguntasOrtografia = await getRandomPerguntas(
+        filhoId,
+        'ortografia',
+        tipo_desafios.ortografia,
+        PERGUNTAS_ORTOGRAFIA
+      );
+      perguntasOrtografia.forEach(pergunta => {
+        perguntas.push({
+          id: String(pergunta.id),
+          tipo: 'ortografia',
+          pergunta: pergunta.pergunta,
+          opcoes: pergunta.opcoes,
+          resposta_correta: pergunta.resposta_correta,
+          explicacao: pergunta.explicacao
+        });
       });
-    });
+    }
 
-    const perguntasCiencias = await getRandomPerguntas(
-      filhoId,
-      'ciencias',
-      tipo_desafios.ciencias,
-      PERGUNTAS_CIENCIAS
-    );
-    perguntasCiencias.forEach(pergunta => {
-      perguntas.push({
-        id: String(pergunta.id),
-        tipo: 'ciencias',
-        pergunta: pergunta.pergunta,
-        opcoes: pergunta.opcoes,
-        resposta_correta: pergunta.resposta_correta,
-        explicacao: pergunta.explicacao
+    if (tipo_desafios.ciencias > 0) {
+      const perguntasCiencias = await getRandomPerguntas(
+        filhoId,
+        'ciencias',
+        tipo_desafios.ciencias,
+        PERGUNTAS_CIENCIAS
+      );
+      perguntasCiencias.forEach(pergunta => {
+        perguntas.push({
+          id: String(pergunta.id),
+          tipo: 'ciencias',
+          pergunta: pergunta.pergunta,
+          opcoes: pergunta.opcoes,
+          resposta_correta: pergunta.resposta_correta,
+          explicacao: pergunta.explicacao
+        });
       });
-    });
+    }
 
     for (let i = 0; i < tipo_desafios.matematica; i++) {
       const desafio = generateMathChallenge();
@@ -419,7 +501,6 @@ router.post('/automatico/:filhoId', async (req, res) => {
       [pai_id, filhoId, JSON.stringify(tipo_desafios), JSON.stringify(perguntas), valorRecompensa, 'pendente', true]
     );
 
-    // Enviar notificação para a criança
     await client.query(
       'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
       [filhoId, `Novo conjunto automático de desafios disponível!`, new Date()]
@@ -440,23 +521,70 @@ router.post('/automatico/:filhoId', async (req, res) => {
   }
 });
 
-router.get('/crianca/:filho_id', async (req, res) => {
-  console.log('Requisição recebida em /desafios/crianca/:filho_id:', req.params.filho_id);
-  const { filho_id } = req.params;
+router.get('/conjuntos/:filhoId', async (req, res) => {
+  const { filhoId } = req.params;
+  console.log(`Requisição recebida em /desafios/conjuntos/${filhoId}`);
+
+  if (!req.headers.authorization) {
+    return res.status(401).json({ error: 'Não autorizado' });
+  }
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('SET search_path TO banco_infantil');
+    console.log(`Executando query para filhoId: ${filhoId}`);
+    const result = await client.query(
+      'SELECT * FROM conjuntos_desafios WHERE filho_id = $1 AND status = $2 ORDER BY criado_em DESC',
+      [parseInt(filhoId), 'pendente']
+    );
+    const conjuntos = result.rows.map(row => ({
+      id: row.id,
+      tipos: typeof row.tipos === 'string' ? (row.tipos ? JSON.parse(row.tipos) : {}) : row.tipos || {},
+      perguntas: typeof row.perguntas === 'string' ? (row.perguntas ? JSON.parse(row.perguntas) : []) : row.perguntas || [],
+      valor_recompensa: parseFloat(row.valor_recompensa) || 0,
+      status: row.status,
+      automatico: row.automatico
+    }));
+    console.log('Conjuntos encontrados:', conjuntos);
+    res.json({ conjuntos });
+  } catch (error) {
+    console.error('Erro ao listar conjuntos de desafios:', error.stack);
+    res.status(500).json({ error: 'Erro ao listar conjuntos de desafios', details: error.message });
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+});
+
+router.get('/conjunto/:id', async (req, res) => {
+  const { id } = req.params;
+  console.log(`Requisição recebida em /desafios/conjunto/${id}`);
+
+  if (!req.headers.authorization) {
+    return res.status(401).json({ error: 'Não autorizado' });
+  }
 
   let client;
   try {
     client = await pool.connect();
     await client.query('SET search_path TO banco_infantil');
     const result = await client.query(
-      'SELECT * FROM conjuntos_desafios WHERE filho_id = $1 AND status = $2 ORDER BY criado_em DESC',
-      [filho_id, 'pendente']
+      'SELECT * FROM conjuntos_desafios WHERE id = $1',
+      [id]
     );
-    console.log('Conjuntos encontrados:', result.rows);
-    res.json({ conjuntos: result.rows });
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Conjunto não encontrado' });
+    }
+    const conjunto = result.rows[0];
+    console.log('Dados brutos do conjunto antes do parse:', { tipos: conjunto.tipos, perguntas: conjunto.perguntas });
+    conjunto.tipos = typeof conjunto.tipos === 'string' ? (conjunto.tipos ? JSON.parse(conjunto.tipos) : {}) : conjunto.tipos || {};
+    conjunto.perguntas = typeof conjunto.perguntas === 'string' ? (conjunto.perguntas ? JSON.parse(conjunto.perguntas) : []) : conjunto.perguntas || [];
+    res.status(200).json({ conjunto });
   } catch (error) {
-    console.error('Erro ao listar conjuntos:', error.stack);
-    res.status(500).json({ error: 'Erro ao listar conjuntos', details: error.message });
+    console.error('Erro ao buscar conjunto:', error.stack);
+    res.status(500).json({ error: 'Erro ao buscar conjunto', details: error.message });
   } finally {
     if (client) {
       client.release();
@@ -472,6 +600,10 @@ router.post('/conjunto/:conjunto_id/responder', async (req, res) => {
   const { conjunto_id } = req.params;
   const { filho_id, pergunta_id, resposta } = req.body;
 
+  if (!req.headers.authorization) {
+    return res.status(401).json({ error: 'Não autorizado' });
+  }
+
   let client;
   try {
     client = await pool.connect();
@@ -484,12 +616,15 @@ router.post('/conjunto/:conjunto_id/responder', async (req, res) => {
     );
     if (conjuntoResult.rows.length === 0) {
       await client.query('ROLLBACK');
-      console.log('Conjunto não encontrado ou já concluído:', { conjunto_id, filho_id });
-      return res.status(404).json({ error: 'Conjunto não encontrado ou já concluído' });
+      console.log('Conjunto não encontrado, já concluído ou expirado:', { conjunto_id, filho_id });
+      return res.status(404).json({ error: 'Conjunto não encontrado, já concluído ou expirado' });
     }
     const conjunto = conjuntoResult.rows[0];
+    console.log('Dados brutos de perguntas antes do parse:', conjunto.perguntas);
+    const perguntas = typeof conjunto.perguntas === 'string' ? (conjunto.perguntas ? JSON.parse(conjunto.perguntas) : []) : conjunto.perguntas || [];
+    console.log('Perguntas parseadas:', perguntas);
 
-    const pergunta = conjunto.perguntas.find(p => String(p.id) === String(pergunta_id));
+    const pergunta = perguntas.find(p => String(p.id) === String(pergunta_id));
     if (!pergunta) {
       await client.query('ROLLBACK');
       console.log('Pergunta não encontrada no conjunto:', { pergunta_id, conjunto_id });
@@ -508,7 +643,7 @@ router.post('/conjunto/:conjunto_id/responder', async (req, res) => {
     );
     const totalRespostas = parseInt(respostasResult.rows[0].total);
     const acertos = parseInt(respostasResult.rows[0].acertos);
-    const totalPerguntas = conjunto.perguntas.length;
+    const totalPerguntas = perguntas.length;
 
     let recompensa = 0;
     let status = 'pendente';
@@ -554,7 +689,7 @@ router.post('/conjunto/:conjunto_id/responder', async (req, res) => {
     console.log('Resultado:', { recompensa, status, message });
 
     await client.query('COMMIT');
-    res.json({ correta, explicacao: pergunta.explicacao, recompensa, status, message });
+    res.json({ correta, explicacao: pergunta.explicacao, recompensa, status, message, perguntas });
   } catch (error) {
     if (client) {
       await client.query('ROLLBACK');
@@ -571,6 +706,10 @@ router.post('/conjunto/:conjunto_id/responder', async (req, res) => {
 router.get('/historico/pai/:pai_id', async (req, res) => {
   console.log('Requisição recebida em /desafios/historico/pai/:pai_id:', req.params.pai_id);
   const { pai_id } = req.params;
+
+  if (!req.headers.authorization) {
+    return res.status(401).json({ error: 'Não autorizado' });
+  }
 
   let client;
   try {
@@ -589,11 +728,11 @@ router.get('/historico/pai/:pai_id', async (req, res) => {
     res.json({
       historico: result.rows.map(row => ({
         id: row.id,
-        tipos: Object.keys(row.tipos).filter(k => row.tipos[k] > 0),
-        valor_recompensa: parseFloat(row.valor_recompensa),
+        tipos: typeof row.tipos === 'string' ? (row.tipos ? JSON.parse(row.tipos) : {}) : row.tipos || {},
+        valor_recompensa: parseFloat(row.valor_recompensa) || 0,
         crianca_nome: row.crianca_nome,
         acertos: parseInt(row.acertos),
-        total_perguntas: Object.values(row.tipos).reduce((a, b) => a + b, 0),
+        total_perguntas: row.tipos ? Object.values(row.tipos).reduce((a, b) => a + b, 0) : 0,
         data_criacao: row.criado_em,
         automatico: row.automatico
       }))
@@ -612,6 +751,10 @@ router.get('/historico/crianca/:filho_id', async (req, res) => {
   console.log('Requisição recebida em /desafios/historico/crianca/:filho_id:', req.params.filho_id);
   const { filho_id } = req.params;
 
+  if (!req.headers.authorization) {
+    return res.status(401).json({ error: 'Não autorizado' });
+  }
+
   let client;
   try {
     client = await pool.connect();
@@ -629,11 +772,11 @@ router.get('/historico/crianca/:filho_id', async (req, res) => {
     res.json({
       historico: result.rows.map(row => ({
         id: row.id,
-        tipos: Object.keys(row.tipos).filter(k => row.tipos[k] > 0),
-        valor_recompensa: parseFloat(row.valor_recompensa),
+        tipos: typeof row.tipos === 'string' ? (row.tipos ? JSON.parse(row.tipos) : {}) : row.tipos || {},
+        valor_recompensa: parseFloat(row.valor_recompensa) || 0,
         crianca_nome: row.crianca_nome,
         acertos: parseInt(row.acertos),
-        total_perguntas: Object.values(row.tipos).reduce((a, b) => a + b, 0),
+        total_perguntas: row.tipos ? Object.values(row.tipos).reduce((a, b) => a + b, 0) : 0,
         data_criacao: row.criado_em,
         automatico: row.automatico
       }))
@@ -652,6 +795,10 @@ router.get('/historico/completo/:id', async (req, res) => {
   console.log('Requisição recebida em /desafios/historico/completo/:id:', req.params.id);
   const { id } = req.params;
   const { tipo } = req.query;
+
+  if (!req.headers.authorization) {
+    return res.status(401).json({ error: 'Não autorizado' });
+  }
 
   let client;
   try {
@@ -717,7 +864,7 @@ router.get('/historico/completo/:id', async (req, res) => {
     const conjuntos = conjuntosResult.rows.map(row => ({
       id: row.id,
       tipo_desafio: row.tipo_desafio,
-      tipos: row.tipos ? Object.keys(row.tipos).filter(k => row.tipos[k] > 0) : [],
+      tipos: typeof row.tipos === 'string' ? (row.tipos ? JSON.parse(row.tipos) : {}) : row.tipos || {},
       valor_recompensa: parseFloat(row.valor_recompensa || 0),
       crianca_nome: row.crianca_nome,
       acertos: parseInt(row.acertos || 0),
@@ -754,6 +901,11 @@ router.get('/historico/completo/:id', async (req, res) => {
 
 router.get('/modelos', async (req, res) => {
   console.log('Requisição recebida em /desafios/modelos');
+
+  if (!req.headers.authorization) {
+    return res.status(401).json({ error: 'Não autorizado' });
+  }
+
   try {
     const modelos = Object.keys(MODELOS_DESAFIOS).map(id => ({
       id,
@@ -771,13 +923,17 @@ router.get('/tentativas/:filhoId/:data', async (req, res) => {
   console.log('Requisição recebida em /desafios/tentativas/:filhoId/:data:', req.params);
   const { filhoId, data } = req.params;
 
+  if (!req.headers.authorization) {
+    return res.status(401).json({ error: 'Não autorizado' });
+  }
+
   let client;
   try {
     client = await pool.connect();
     await client.query('SET search_path TO banco_infantil');
     const result = await client.query(
       'SELECT tentativas FROM tentativas_desafios WHERE filho_id = $1 AND data = $2',
-      [filhoId, data]
+      [parseInt(filhoId), data]
     );
     const tentativas = result.rows[0]?.tentativas ?? 0;
     console.log(`Tentativas encontradas para filho ${filhoId} em ${data}: ${tentativas}`);
@@ -796,6 +952,10 @@ router.post('/incrementar-tentativa/:filhoId', async (req, res) => {
   console.log('Requisição recebida em /desafios/incrementar-tentativa/:filhoId:', req.params.filhoId);
   const { filhoId } = req.params;
 
+  if (!req.headers.authorization) {
+    return res.status(401).json({ error: 'Não autorizado' });
+  }
+
   let client;
   try {
     client = await pool.connect();
@@ -806,7 +966,7 @@ router.post('/incrementar-tentativa/:filhoId', async (req, res) => {
        VALUES ($1, CURRENT_DATE, 1)
        ON CONFLICT (filho_id, data)
        DO UPDATE SET tentativas = tentativas_desafios.tentativas + 1`,
-      [filhoId]
+      [parseInt(filhoId)]
     );
     await client.query('COMMIT');
     res.status(200).json({ message: 'Tentativa registrada com sucesso' });
@@ -827,6 +987,10 @@ router.post('/gerar/:filhoId', async (req, res) => {
   console.log('Requisição recebida em /desafios/gerar/:filhoId:', req.params.filhoId);
   const { filhoId } = req.params;
   const { modeloId, valorTotal, paiId } = req.body;
+
+  if (!req.headers.authorization) {
+    return res.status(401).json({ error: 'Não autorizado' });
+  }
 
   let client;
   try {
@@ -860,7 +1024,7 @@ router.post('/gerar/:filhoId', async (req, res) => {
     const today = new Date().toISOString().split('T')[0];
     const desafiosExistentes = await client.query(
       `SELECT COUNT(*) FROM desafios_matematicos WHERE filho_id = $1 AND DATE(data_criacao) = $2 AND status = 'pendente'`,
-      [filhoId, today]
+      [parseInt(filhoId), today]
     );
     if (parseInt(desafiosExistentes.rows[0].count) > 0) {
       console.log('Desafios pendentes encontrados para hoje:', { filhoId });
@@ -916,9 +1080,14 @@ router.post('/gerar/:filhoId', async (req, res) => {
     for (const desafio of desafios) {
       await client.query(
         'INSERT INTO desafios_matematicos (filho_id, tipo, pergunta, resposta_correta, valor, status) VALUES ($1, $2, $3, $4, $5, $6)',
-        [filhoId, desafio.tipo, desafio.pergunta, desafio.respostaCorreta, valorTotal, 'pendente']
+        [parseInt(filhoId), desafio.tipo, desafio.pergunta, desafio.respostaCorreta, valorTotal, 'pendente']
       );
     }
+
+    await client.query(
+      'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
+      [filhoId, `Novos desafios matemáticos disponíveis!`, new Date()]
+    );
 
     await client.query('COMMIT');
     res.status(201).json({ message: 'Desafios gerados com sucesso!' });
@@ -939,6 +1108,10 @@ router.get('/:filhoId', async (req, res) => {
   console.log('Requisição recebida em /desafios/:filhoId:', req.params.filhoId);
   const { filhoId } = req.params;
 
+  if (!req.headers.authorization) {
+    return res.status(401).json({ error: 'Não autorizado' });
+  }
+
   let client;
   try {
     client = await pool.connect();
@@ -946,14 +1119,14 @@ router.get('/:filhoId', async (req, res) => {
     const today = new Date().toISOString().split('T')[0];
     const result = await client.query(
       `SELECT id, tipo, pergunta, valor FROM desafios_matematicos WHERE filho_id = $1 AND status = 'pendente' AND DATE(data_criacao) = $2 ORDER BY id`,
-      [filhoId, today]
+      [parseInt(filhoId), today]
     );
     res.status(200).json({
       desafios: result.rows.map(desafio => ({
         id: desafio.id,
         tipo: desafio.tipo,
         pergunta: desafio.pergunta,
-        valor: parseFloat(desafio.valor)
+        valor: parseFloat(desafio.valor) || 0
       }))
     });
   } catch (error) {
@@ -967,9 +1140,13 @@ router.get('/:filhoId', async (req, res) => {
 });
 
 router.post('/responder/:desafioId', async (req, res) => {
-  console.log('Requisição recebida em /desafio/responder/:desafioId:', req.params.desafioId);
+  console.log('Requisição recebida em /desafios/responder/:desafioId:', req.params.desafioId);
   const { desafioId } = req.params;
   const { resposta, filhoId, paiId } = req.body;
+
+  if (!req.headers.authorization) {
+    return res.status(401).json({ error: 'Não autorizado' });
+  }
 
   let client;
   try {
@@ -979,7 +1156,7 @@ router.post('/responder/:desafioId', async (req, res) => {
 
     const desafioResult = await client.query(
       'SELECT resposta_correta, valor, status FROM desafios_matematicos WHERE id = $1 AND filho_id = $2',
-      [desafioId, filhoId]
+      [desafioId, parseInt(filhoId)]
     );
     if (desafioResult.rows.length === 0) {
       await client.query('ROLLBACK');
@@ -1003,7 +1180,7 @@ router.post('/responder/:desafioId', async (req, res) => {
     const today = new Date().toISOString().split('T')[0];
     const desafiosDia = await client.query(
       `SELECT status FROM desafios_matematicos WHERE filho_id = $1 AND DATE(data_criacao) = $2`,
-      [filhoId, today]
+      [parseInt(filhoId), today]
     );
 
     const todosRespondidos = desafiosDia.rows.length === 15 && desafiosDia.rows.every(d => d.status !== 'pendente');
@@ -1067,6 +1244,10 @@ router.get('/historico/matematicos/pai/:paiId', async (req, res) => {
   console.log('Requisição recebida em /desafios/historico/matematicos/pai:', req.params.paiId);
   const { paiId } = req.params;
 
+  if (!req.headers.authorization) {
+    return res.status(401).json({ error: 'Não autorizado' });
+  }
+
   let client;
   try {
     client = await pool.connect();
@@ -1085,7 +1266,7 @@ router.get('/historico/matematicos/pai/:paiId', async (req, res) => {
       nomeFilho: d.nome_completo,
       pergunta: d.pergunta,
       respostaCorreta: parseFloat(d.resposta_correta),
-      valor: parseFloat(d.valor),
+      valor: parseFloat(d.valor) || 0,
       status: d.status,
       data: d.data_criacao
     }));
@@ -1093,6 +1274,53 @@ router.get('/historico/matematicos/pai/:paiId', async (req, res) => {
   } catch (error) {
     console.error('Erro ao buscar histórico de desafios:', error.stack);
     res.status(500).json({ error: 'Erro ao buscar histórico', details: error.message });
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+});
+
+router.delete('/conjunto/:id', async (req, res) => {
+  console.log('Requisição recebida em /desafios/conjunto/:id:', req.params.id);
+  const { id } = req.params;
+  const { filho_id } = req.body;
+
+  if (!req.headers.authorization) {
+    return res.status(401).json({ error: 'Não autorizado' });
+  }
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+    await client.query('SET search_path TO banco_infantil');
+
+    const conjuntoResult = await client.query(
+      'SELECT id FROM conjuntos_desafios WHERE id = $1 AND filho_id = $2 AND status = $3',
+      [id, filho_id, 'pendente']
+    );
+    if (conjuntoResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Conjunto não encontrado, já concluído ou expirado' });
+    }
+
+    await client.query('DELETE FROM respostas_desafios WHERE conjunto_id = $1', [id]);
+    await client.query('DELETE FROM conjuntos_desafios WHERE id = $1', [id]);
+
+    await client.query(
+      'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
+      [filho_id, `Conjunto de desafios ${id} foi excluído.`, new Date()]
+    );
+
+    await client.query('COMMIT');
+    res.status(200).json({ message: 'Conjunto excluído com sucesso' });
+  } catch (error) {
+    if (client) {
+      await client.query('ROLLBACK');
+    }
+    console.error('Erro ao excluir conjunto:', error.stack);
+    res.status(500).json({ error: 'Erro ao excluir conjunto', details: error.message });
   } finally {
     if (client) {
       client.release();

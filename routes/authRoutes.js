@@ -1,6 +1,12 @@
 const express = require('express');
 const router = express.Router();
 const { pool } = require('../db');
+const jwt = require('jsonwebtoken');
+
+console.log('Carregando authRoutes.js');
+
+// Chave secreta para JWT (mover para variável de ambiente em produção)
+const JWT_SECRET = process.env.JWT_SECRET || 'sua_chave_secreta_aqui';
 
 router.post('/login', async (req, res) => {
   console.log('Requisição recebida em /auth/login:', req.body);
@@ -37,16 +43,27 @@ router.post('/login', async (req, res) => {
       }
 
       if (!user) {
-        console.log('Credenciais inválidas');
+        console.log('Credenciais inválidas para:', email);
         return res.status(401).json({ error: 'Credenciais inválidas' });
       }
 
-      res.status(200).json({ user, message: 'Login realizado com sucesso!' });
+      // Gerar token JWT
+      const token = jwt.sign(
+        { id: user.id, tipo: user.tipo, email: user.email },
+        JWT_SECRET,
+        { expiresIn: '1h' }
+      );
+
+      console.log('Login bem-sucedido:', { userId: user.id, tipo: user.tipo });
+      res.status(200).json({ user, token, message: 'Login realizado com sucesso!' });
+    } catch (error) {
+      console.error('Erro interno ao fazer login:', error.stack);
+      res.status(500).json({ error: 'Erro ao fazer login', details: error.message });
     } finally {
       client.release();
     }
   } catch (error) {
-    console.error('Erro ao fazer login:', error.stack);
+    console.error('Erro ao conectar ao banco para login:', error.stack);
     res.status(500).json({ error: 'Erro ao fazer login', details: error.message });
   }
 });
@@ -81,7 +98,7 @@ router.post('/cadastro', async (req, res) => {
         return res.status(400).json({ error: 'Email da criança já cadastrado' });
       }
 
-      // Cadastrar responsável
+      // Cadastrar responsável (senha em texto puro)
       const paiResult = await client.query(
         'INSERT INTO pais (nome_completo, email, senha, telefone, cpf) VALUES ($1, $2, $3, $4, $5) RETURNING id',
         [pai.nome_completo, pai.email, pai.senha, pai.telefone, pai.cpf]
@@ -94,7 +111,7 @@ router.post('/cadastro', async (req, res) => {
         [paiId, 1000.00] // Saldo inicial de exemplo
       );
 
-      // Cadastrar criança
+      // Cadastrar criança (senha em texto puro)
       const filhoResult = await client.query(
         'INSERT INTO filhos (pai_id, nome_completo, email, senha, telefone, icone) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
         [paiId, filho.nome_completo, filho.email, filho.senha, filho.telefone, filho.icone || 'default.png']
@@ -109,20 +126,28 @@ router.post('/cadastro', async (req, res) => {
 
       await client.query('COMMIT');
 
-      // Retornar o usuário responsável para login automático
+      // Gerar token JWT para login automático
       const user = {
         id: paiId,
         nome_completo: pai.nome_completo,
         email: pai.email,
         tipo: 'pai'
       };
+      const token = jwt.sign(
+        { id: user.id, tipo: user.tipo, email: user.email },
+        JWT_SECRET,
+        { expiresIn: '1h' }
+      );
 
-      res.status(201).json({ user, message: 'Cadastro realizado com sucesso!' });
+      res.status(201).json({ user, token, message: 'Cadastro realizado com sucesso!' });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error('Erro ao cadastrar:', error.stack);
+      res.status(500).json({ error: 'Erro ao cadastrar', details: error.message });
     } finally {
       client.release();
     }
   } catch (error) {
-    await client.query('ROLLBACK');
     console.error('Erro ao cadastrar:', error.stack);
     res.status(500).json({ error: 'Erro ao cadastrar', details: error.message });
   }
