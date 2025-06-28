@@ -99,10 +99,10 @@ router.post('/conta/adicionar-saldo', async (req, res) => {
 });
 
 // Endpoint para depositar dinheiro na conta do pai via PUT
-router.put('/conta/deposito/:id', async (req, res) => {
-  console.log('Requisição recebida em /conta/deposito:', req.params.id, req.body);
-  const { id } = req.params;
-  const { valor } = req.body;
+router.put('/conta/deposito/:paiId', async (req, res) => {
+  console.log('Requisição recebida em /conta/deposito:', req.params.paiId, req.body);
+  const { paiId } = req.params;
+  const { valor, descricao } = req.body;
 
   try {
     if (!valor || valor <= 0) {
@@ -115,24 +115,25 @@ router.put('/conta/deposito/:id', async (req, res) => {
       await client.query('BEGIN');
       await client.query('SET search_path TO banco_infantil');
 
-      const contaResult = await client.query(
-        'SELECT * FROM contas WHERE id = $1 AND pai_id IS NOT NULL',
-        [id]
+      const contaPaiResult = await client.query(
+        'SELECT id, saldo FROM contas WHERE pai_id = $1',
+        [paiId]
       );
-      if (contaResult.rows.length === 0) {
+      if (contaPaiResult.rows.length === 0) {
         await client.query('ROLLBACK');
-        return res.status(404).json({ error: 'Conta não encontrada' });
+        return res.status(404).json({ error: 'Conta do responsável não encontrada' });
       }
 
-      const novoSaldo = parseFloat(contaResult.rows[0].saldo) + parseFloat(valor);
+      const contaId = contaPaiResult.rows[0].id;
+      const novoSaldo = parseFloat(contaPaiResult.rows[0].saldo) + parseFloat(valor);
       await client.query(
         'UPDATE contas SET saldo = $1 WHERE id = $2',
-        [novoSaldo, id]
+        [novoSaldo, contaId]
       );
 
       const result = await client.query(
         'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ($1, $2, $3, $4, $5) RETURNING id',
-        [id, 'deposito', parseFloat(valor), 'Depósito manual', 'deposito']
+        [contaId, 'deposito', parseFloat(valor), descricao || 'Depósito manual', 'deposito']
       );
 
       await client.query('COMMIT');
