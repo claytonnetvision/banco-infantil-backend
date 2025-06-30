@@ -481,23 +481,34 @@ router.get('/tarefas-automaticas/listar/:paiId', async (req, res) => {
       await client.query('BEGIN');
       await client.query('SET search_path TO banco_infantil');
 
-      // Excluir tarefas automáticas vencidas (excluindo apenas as com data_fim anterior ao dia atual)
+      // Excluir tarefas automáticas vencidas e suas tarefas associadas
       const tarefasVencidas = await client.query(
-        'SELECT id, filho_id FROM tarefas_automaticas WHERE pai_id = $1 AND data_fim < CURRENT_DATE - INTERVAL \'1 day\'',
+        'SELECT ta.id, ta.filho_id FROM tarefas_automaticas ta WHERE ta.pai_id = $1 AND ta.data_fim < CURRENT_DATE - INTERVAL \'1 day\'',
         [parseInt(paiId)]
       );
 
       for (const tarefa of tarefasVencidas.rows) {
+        // Remover tarefas associadas na tabela tarefas
+        await client.query(
+          'DELETE FROM tarefas WHERE tarefa_automatica_id = $1',
+          [tarefa.id]
+        );
+        // Remover a tarefa automática
         await client.query('DELETE FROM tarefas_automaticas WHERE id = $1', [tarefa.id]);
         await client.query(
           'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
-          [parseInt(tarefa.filho_id), 'Uma tarefa automática expirou e foi removida.', new Date()]
+          [parseInt(tarefa.filho_id), 'Uma tarefa automática expirou e foi removida com suas tarefas associadas.', new Date()]
         );
       }
 
-      // Listar tarefas automáticas válidas
+      // Verificar estrutura da tabela para depuração
+      const tableCheck = await client.query('SELECT column_name FROM information_schema.columns WHERE table_name = \'tarefas_automaticas\' AND table_schema = \'banco_infantil\'');
+      console.log('Colunas da tabela tarefas_automaticas:', tableCheck.rows.map(row => row.column_name));
+
+      // Listar tarefas automáticas válidas usando criado_em para ordenação
       const result = await client.query(
-        'SELECT ta.id, ta.filho_id, ta.descricao, ta.valor::float, ta.dias_semana, ta.data_inicio, ta.data_fim, ta.ativo, f.nome_completo FROM tarefas_automaticas ta JOIN filhos f ON ta.filho_id = f.id WHERE ta.pai_id = $1 ORDER BY ta.criado_em DESC',
+        'SELECT ta.id, ta.filho_id, ta.descricao, ta.valor::float, ta.dias_semana, ta.data_inicio, ta.data_fim, ta.ativo, f.nome_completo ' +
+        'FROM tarefas_automaticas ta JOIN filhos f ON ta.filho_id = f.id WHERE ta.pai_id = $1 ORDER BY ta.criado_em DESC',
         [parseInt(paiId)]
       );
 
@@ -506,7 +517,8 @@ router.get('/tarefas-automaticas/listar/:paiId', async (req, res) => {
       res.status(200).json({ tarefas_automaticas: result.rows });
     } catch (error) {
       await client.query('ROLLBACK');
-      throw error;
+      console.error('Erro ao listar tarefas automáticas:', error.stack);
+      res.status(500).json({ error: 'Erro ao listar tarefas automáticas', details: error.message });
     } finally {
       client.release();
     }

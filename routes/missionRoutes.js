@@ -40,7 +40,28 @@ cron.schedule('0 0 * * *', async () => {
     if (client) client.release();
   }
 });
+// Tarefa agendada para excluir análises antigas (7 dias)
+cron.schedule('0 0 * * *', async () => {
+  console.log('Executando limpeza de análises psicológicas antigas:', new Date().toISOString());
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('SET search_path TO banco_infantil');
+    await client.query('BEGIN');
 
+    const result = await client.query(
+      'DELETE FROM analises_psicologicas WHERE data_analise < CURRENT_TIMESTAMP - INTERVAL \'7 days\' RETURNING id'
+    );
+    console.log(`Limpeza concluída: ${result.rowCount} análises excluídas.`);
+
+    await client.query('COMMIT');
+  } catch (error) {
+    if (client) await client.query('ROLLBACK');
+    console.error('Erro na limpeza agendada de análises:', error.stack);
+  } finally {
+    if (client) client.release();
+  }
+});
 // Endpoint para configurar mesada
 router.post('/mesada', async (req, res) => {
   console.log('Requisição recebida em /mesada:', req.body);
@@ -1140,7 +1161,8 @@ router.post('/missao/aprovar/:missaoId', async (req, res) => {
   }
 });
 
-// Endpoint para gerar relatório PDF
+// Endpoint para gerar relatório PDF com jsPDF
+const { jsPDF } = require('jspdf');
 router.post('/gerar-relatorio-pdf', async (req, res) => {
   console.log('Requisição recebida em /gerar-relatorio-pdf:', req.body);
   const { missao } = req.body;
@@ -1159,8 +1181,10 @@ router.post('/gerar-relatorio-pdf', async (req, res) => {
     try {
       await client.query('SET search_path TO banco_infantil');
       const missaoResult = await client.query(
-        'SELECT mp.id, mp.filho_id, mp.pai_id, mp.tipo, mp.valor_recompensa, mp.descricao, mp.equipe_nomes, mp.status, mp.data_criacao, mp.imagem, f.nome_completo ' +
-        'FROM missoes_personalizadas mp JOIN filhos f ON mp.filho_id = f.id ' +
+        'SELECT mp.id, mp.filho_id, mp.pai_id, mp.tipo, mp.valor_recompensa, mp.descricao, mp.equipe_nomes, mp.status, mp.data_criacao, mp.imagem, f.nome_completo, ap.analise ' +
+        'FROM missoes_personalizadas mp ' +
+        'JOIN filhos f ON mp.filho_id = f.id ' +
+        'LEFT JOIN analises_psicologicas ap ON mp.id = ap.missao_id ' +
         'WHERE mp.id = $1 AND mp.filho_id = $2 AND mp.pai_id = $3',
         [parseInt(missao.id), parseInt(missao.filho_id), parseInt(missao.pai_id)]
       );
@@ -1170,73 +1194,59 @@ router.post('/gerar-relatorio-pdf', async (req, res) => {
       }
 
       const missaoData = missaoResult.rows[0];
-      const outputDir = path.join(__dirname, '../reports');
-      if (!fs.existsSync(outputDir)) {
-        fs.mkdirSync(outputDir, { recursive: true });
-      }
+      const doc = new jsPDF();
 
-      const texFileName = `relatorio_missao_${missaoData.id}.tex`;
-      const texFilePath = path.join(outputDir, texFileName);
-      const pdfFilePath = path.join(outputDir, `relatorio_missao_${missaoData.id}.pdf`);
+      doc.setFontSize(16);
+      doc.text('Relatório de Missão - Banco Infantil', 10, 10);
+      doc.setFontSize(12);
 
-      const tipoMissao = {
+      // Informações da Missão
+      let y = 20;
+      doc.text(`Criança: ${missaoData.nome_completo}`, 10, y);
+      y += 10;
+      doc.text(`Tipo da Missão: ${{
         time_familiar: 'Time Familiar',
         resumo_livro: 'Resumo de Livro',
         desenho: 'Desenho'
-      }[missaoData.tipo] || missaoData.tipo;
+      }[missaoData.tipo] || missaoData.tipo}`, 10, y);
+      y += 10;
+      doc.text(`Data de Criação: ${new Date(missaoData.data_criacao).toLocaleDateString('pt-BR')}`, 10, y);
+      y += 10;
+      doc.text(`Valor da Recompensa: R$ ${parseFloat(missaoData.valor_recompensa).toFixed(2)}`, 10, y);
+      y += 10;
+      if (missaoData.equipe_nomes) {
+        doc.text(`Equipe: ${missaoData.equipe_nomes}`, 10, y);
+        y += 10;
+      }
 
-      const texContent = `
-\\documentclass[a4paper,12pt]{article}
-\\usepackage[utf8]{inputenc}
-\\usepackage{graphicx}
-\\usepackage{geometry}
-\\geometry{margin=1in}
-\\begin{document}
-\\title{Relatório de Missão - Banco Infantil}
-\\author{}
-\\date{}
-\\maketitle
-\\section*{Informações da Missão}
-\\textbf{Criança:} ${missaoData.nome_completo.replace(/&/g, '\\&')} \\\\
-\\textbf{Tipo da Missão:} ${tipoMissao} \\\\
-\\textbf{Data de Criação:} ${new Date(missaoData.data_criacao).toLocaleDateString('pt-BR')} \\\\
-\\textbf{Valor da Recompensa:} R\\$ ${parseFloat(missaoData.valor_recompensa).toFixed(2)} \\\\
-${missaoData.equipe_nomes ? `\\textbf{Equipe:} ${missaoData.equipe_nomes.replace(/&/g, '\\&')} \\\\` : ''}
-\\section*{Conteúdo da Missão}
-${missaoData.descricao ? `\\textbf{Descrição:} ${missaoData.descricao.replace(/&/g, '\\&').replace(/\n/g, '\\\\')} \\\\` : ''}
-${missaoData.imagem ? `\\textbf{Imagem:} Veja o arquivo em anexo ou acesse \\url{http://localhost:5000${missaoData.imagem}} \\\\` : ''}
-\\section*{Nota para o Psicólogo}
-Este relatório contém o conteúdo da missão realizada pela criança, que pode ser usado para avaliar aspectos criativos, emocionais ou cognitivos. Analise o texto ou imagem para insights sobre o desenvolvimento da criança.
-\\end{document}
-`;
+      // Conteúdo da Missão
+      doc.text('Conteúdo da Missão', 10, y);
+      y += 10;
+      const descricaoLines = doc.splitTextToSize(`Descrição da Criança: ${missaoData.descricao || 'Nenhuma descrição fornecida'}`, 180); // 180 é a largura aproximada da página
+      doc.text(descricaoLines, 10, y);
+      y += descricaoLines.length * 7; // Ajusta o espaçamento com base no número de linhas
+      if (missaoData.imagem) {
+        doc.text(`Imagem: http://localhost:5000${missaoData.imagem}`, 10, y);
+        y += 10;
+      }
 
-      fs.writeFileSync(texFilePath, texContent);
+      // Análise Psicológica
+      doc.text('Análise Psicológica', 10, y);
+      y += 10;
+      const analiseLines = doc.splitTextToSize(`Análise: ${missaoData.analise || 'Nenhuma análise disponível'}`, 180);
+      doc.text(analiseLines, 10, y);
+      y += analiseLines.length * 7;
 
-      exec(`pdflatex -output-directory=${outputDir} ${texFilePath}`, (error, stdout, stderr) => {
-        if (error) {
-          console.error('Erro ao gerar PDF:', error, stderr);
-          return res.status(500).json({ error: 'Erro ao gerar PDF', details: error.message });
-        }
+      // Nota para o Psicólogo
+      doc.text('Nota para o Psicólogo', 10, y);
+      y += 10;
+      const notaLines = doc.splitTextToSize('Este relatório contém a descrição da criança e a análise gerada, que podem ser usadas para avaliar aspectos emocionais, criativos ou cognitivos.', 180);
+      doc.text(notaLines, 10, y);
 
-        fs.readFile(pdfFilePath, (err, data) => {
-          if (err) {
-            console.error('Erro ao ler PDF:', err);
-            return res.status(500).json({ error: 'Erro ao ler PDF', details: err.message });
-          }
-
-          res.setHeader('Content-Type', 'application/pdf');
-          res.setHeader('Content-Disposition', `attachment; filename=relatorio_missao_${missaoData.id}.pdf`);
-          res.send(data);
-
-          // Limpar arquivos temporários
-          ['aux', 'log', 'tex'].forEach(ext => {
-            const tempFile = path.join(outputDir, `relatorio_missao_${missaoData.id}.${ext}`);
-            if (fs.existsSync(tempFile)) {
-              fs.unlinkSync(tempFile);
-            }
-          });
-        });
-      });
+      const pdfBuffer = doc.output('arraybuffer');
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename=relatorio_missao_${missaoData.id}.pdf`);
+      res.send(Buffer.from(pdfBuffer));
     } finally {
       client.release();
     }
@@ -1276,17 +1286,23 @@ router.post('/analise-psicologica', async (req, res) => {
       }
 
       const missaoData = missaoResult.rows[0];
+      const textoCrianca = missaoData.descricao || 'Nenhum texto fornecido';
       const imagemPath = missaoData.imagem ? path.join(__dirname, '../', missaoData.imagem.replace(/^\/Uploads\//, 'Uploads/')) : null;
 
       const { analisarMissao } = require('../services/GeminiPsychologicalService');
       const analise = await analisarMissao({ missao: missaoData, imagemPath });
 
-      await client.query(
-        'INSERT INTO analises_psicologicas (missao_id, filho_id, analise, data_analise) VALUES ($1, $2, $3, CURRENT_TIMESTAMP) RETURNING id',
-        [parseInt(missaoData.id), parseInt(missaoData.filho_id), analise.analise]
+      const result = await client.query(
+        'INSERT INTO analises_psicologicas (missao_id, filho_id, analise, texto_crianca, data_analise) VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP) RETURNING id',
+        [parseInt(missaoData.id), parseInt(missaoData.filho_id), analise.analise, textoCrianca]
       );
 
-      res.status(200).json({ analise: analise.analise, message: 'Análise psicológica gerada com sucesso!' });
+      res.status(200).json({
+        id: result.rows[0].id,
+        analise: analise.analise,
+        texto_crianca: textoCrianca,
+        message: 'Análise psicológica gerada com sucesso!'
+      });
     } finally {
       client.release();
     }
@@ -1329,4 +1345,94 @@ router.get('/analises/:paiId', async (req, res) => {
   }
 });
 
+// Endpoint para excluir missão
+router.delete('/missao/:id', async (req, res) => {
+  console.log('Requisição recebida em /missao/:id:', req.params.id);
+  const { id } = req.params;
+  const { pai_id } = req.body;
+
+  try {
+    if (!req.headers.authorization) {
+      console.log('Erro: Nenhum token de autorização fornecido');
+      return res.status(401).json({ error: 'Não autorizado' });
+    }
+    if (!pai_id) {
+      console.log('ID do responsável é obrigatório');
+      return res.status(400).json({ error: 'ID do responsável é obrigatório' });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('SET search_path TO banco_infantil');
+      await client.query('BEGIN');
+
+      const missaoExistente = await client.query(
+        'SELECT id FROM missoes_personalizadas WHERE id = $1 AND pai_id = $2 AND status = $3',
+        [parseInt(id), parseInt(pai_id), 'pendente']
+      );
+      if (missaoExistente.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Missão não encontrada ou não pertence ao usuário' });
+      }
+
+      await client.query('DELETE FROM missoes_personalizadas WHERE id = $1', [parseInt(id)]);
+      await client.query(
+        'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ((SELECT filho_id FROM missoes_personalizadas WHERE id = $1), $2, $3)',
+        [parseInt(id), 'Sua missão foi excluída pelo responsável.', new Date()]
+      );
+
+      await client.query('COMMIT');
+      console.log('Missão excluída:', { id, pai_id });
+      res.status(200).json({ message: 'Missão excluída com sucesso!' });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Erro ao excluir missão:', error.stack);
+    res.status(500).json({ error: 'Erro ao excluir missão', details: error.message });
+  }
+});
+// Endpoint para excluir análise psicológica
+router.delete('/analise/:id', async (req, res) => {
+  console.log('Requisição recebida em /analise/:id:', req.params.id);
+  const { id } = req.params;
+
+  try {
+    if (!req.headers.authorization) {
+      console.log('Erro: Nenhum token de autorização fornecido');
+      return res.status(401).json({ error: 'Não autorizado' });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('SET search_path TO banco_infantil');
+      await client.query('BEGIN');
+
+      const result = await client.query(
+        'DELETE FROM analises_psicologicas WHERE id = $1 RETURNING id',
+        [parseInt(id)]
+      );
+
+      if (result.rowCount === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Análise não encontrada' });
+      }
+
+      await client.query('COMMIT');
+      console.log('Análise excluída:', { id });
+      res.status(200).json({ message: 'Análise excluída com sucesso!' });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Erro ao excluir análise:', error.stack);
+    res.status(500).json({ error: 'Erro ao excluir análise', details: error.message });
+  }
+});
 module.exports = router;
