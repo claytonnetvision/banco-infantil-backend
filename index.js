@@ -21,12 +21,27 @@ const app = express();
 const API_URL = process.env.API_URL || "http://localhost:5000";
 console.log(`API_URL configurada como: ${API_URL}`);
 
-// Configuração do CORS - Dinâmico com base no ambiente
+// Configuração do CORS - Suportar múltiplos origens
+const allowedOrigins = [
+  'http://localhost:3000', // Frontend local
+  process.env.FRONTEND_URL || 'https://www.tarefinhapaga.com.br' // Frontend em produção
+];
+
 const corsOptions = {
-  origin: API_URL === "http://localhost:5000" ? "http://localhost:3000" : process.env.FRONTEND_URL || "https://seu-frontend.vercel.app", // Ajuste o domínio do Vercel
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
-  credentials: true
+  origin: (origin, callback) => {
+    // Permitir requisições sem origem (ex.: Postman) ou de origens permitidas
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.error(`Origem não permitida pelo CORS: ${origin}`);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  credentials: true,
+  allowedHeaders: ['Content-Type', 'Authorization']
 };
+
 app.use(cors(corsOptions));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -232,7 +247,7 @@ app.delete("/desafios/conjunto/:conjuntoId", async (req, res) => {
 // Middleware de erro
 app.use((err, req, res, next) => {
   console.error(
-    `Erro na requisição: ${req.method} ${req.url} - Origem: ${req.ip} - Data: ${new Date().toISOString()} - Erro: ${err.message}`
+ | `Erro na requisição: ${req.method} ${req.url} - Origem: ${req.ip} - Data: ${new Date().toISOString()} - Erro: ${err.message}`
   );
   res.status(500).json({ error: "Erro interno do servidor", details: err.message });
 });
