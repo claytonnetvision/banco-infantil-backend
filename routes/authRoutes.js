@@ -153,4 +153,45 @@ router.post('/cadastro', async (req, res) => {
   }
 });
 
+// Nova rota para alterar senha (sem criptografia)
+router.post('/alterar-senha', async (req, res) => {
+  console.log('Requisição recebida em /alterar-senha:', req.body);
+  const { email, novaSenha, tipo } = req.body;
+
+  try {
+    if (!email || !novaSenha || !tipo) {
+      return res.status(400).json({ error: 'Dados incompletos' });
+    }
+    if (novaSenha.length < 6) {
+      return res.status(400).json({ error: 'Senha deve ter pelo menos 6 caracteres' });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SET search_path TO banco_infantil');
+
+      let table = tipo === 'pai' ? 'pais' : 'filhos';
+      const userResult = await client.query(`SELECT id FROM ${table} WHERE email = $1`, [email]);
+      if (userResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Usuário não encontrado' });
+      }
+
+      await client.query(`UPDATE ${table} SET senha = $1 WHERE email = $2`, [novaSenha, email]);
+
+      await client.query('COMMIT');
+      res.json({ message: 'Senha alterada com sucesso!' });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Erro ao alterar senha:', error.stack);
+    res.status(500).json({ error: 'Erro ao alterar senha' });
+  }
+});
+
 module.exports = router;
