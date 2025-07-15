@@ -247,7 +247,7 @@ app.delete("/desafios/conjunto/:conjuntoId", async (req, res) => {
 // Middleware de erro
 app.use((err, req, res, next) => {
   console.error(
- | `Erro na requisição: ${req.method} ${req.url} - Origem: ${req.ip} - Data: ${new Date().toISOString()} - Erro: ${err.message}`
+    `Erro na requisição: ${req.method} ${req.url} - Origem: ${req.ip} - Data: ${new Date().toISOString()} - Erro: ${err.message}`
   );
   res.status(500).json({ error: "Erro interno do servidor", details: err.message });
 });
