@@ -2,15 +2,16 @@ const express = require('express');
 const router = express.Router();
 const { pool } = require('../db');
 
-// Hardcoded admin credentials (MUDE ISSO! Para produção, use env vars ou banco)
-const ADMIN_USER = 'admin';
-const ADMIN_PASS = 'admin123'; // Senha simples, sem crypt
+// Usar variáveis de ambiente do .env
+const ADMIN_USER = process.env.ADMIN_USER || 'admin'; // Fallback para debug
+const ADMIN_PASS = process.env.ADMIN_PASS || 'M@ch1nes@rob123'; // Fallback para debug
 
 // Middleware para autenticar admin (session simples via local var - para prod, use JWT)
-let adminSession = false; // Global session (não ideal, use Redis/JWT em prod)
+let adminSession = false;
 
 router.post('/login', (req, res) => {
   const { username, password } = req.body;
+  console.log('Tentativa de login admin:', { username, password });
   if (username === ADMIN_USER && password === ADMIN_PASS) {
     adminSession = true;
     res.json({ message: 'Admin logged in' });
@@ -32,12 +33,22 @@ const checkAdmin = (req, res, next) => {
 router.get('/users', checkAdmin, async (req, res) => {
   try {
     const client = await pool.connect();
-    const pais = await client.query('SELECT id, nome_completo, email, senha, tipo FROM pais');
-    const filhos = await client.query('SELECT id, nome_completo, email, senha, tipo FROM filhos');
-    client.release();
-    res.json({ users: [...pais.rows, ...filhos.rows] });
+    try {
+      await client.query('SET search_path TO banco_infantil');
+      console.log('Consultando tabelas pais e filhos...');
+      const pais = await client.query('SELECT id, nome_completo, email, senha, tipo FROM pais');
+      const filhos = await client.query('SELECT id, nome_completo, email, senha, tipo FROM filhos');
+      console.log('Consulta concluída:', { paisRows: pais.rowCount, filhosRows: filhos.rowCount });
+      res.json({ users: [...pais.rows, ...filhos.rows] });
+    } catch (err) {
+      console.error('Erro na query de usuários:', err.stack);
+      res.status(500).json({ error: 'Erro ao listar usuários', details: err.message });
+    } finally {
+      client.release();
+    }
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Erro ao conectar ao pool:', err.stack);
+    res.status(500).json({ error: 'Erro interno', details: err.message });
   }
 });
 
@@ -46,10 +57,16 @@ router.get('/user/search', checkAdmin, async (req, res) => {
   const { query } = req.query;
   try {
     const client = await pool.connect();
-    const pais = await client.query('SELECT * FROM pais WHERE email ILIKE $1 OR id::text = $1', [`%${query}%`]);
-    const filhos = await client.query('SELECT * FROM filhos WHERE email ILIKE $1 OR id::text = $1', [`%${query}%`]);
-    client.release();
-    res.json({ users: [...pais.rows, ...filhos.rows] });
+    try {
+      await client.query('SET search_path TO banco_infantil');
+      const pais = await client.query('SELECT * FROM pais WHERE email ILIKE $1 OR id::text = $1', [`%${query}%`]);
+      const filhos = await client.query('SELECT * FROM filhos WHERE email ILIKE $1 OR id::text = $1', [`%${query}%`]);
+      res.json({ users: [...pais.rows, ...filhos.rows] });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    } finally {
+      client.release();
+    }
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -57,7 +74,7 @@ router.get('/user/search', checkAdmin, async (req, res) => {
 
 // Add user (pai or filho)
 router.post('/user/add', checkAdmin, async (req, res) => {
-  const { tipo, nome_completo, email, senha, telefone, cpf, pai_id } = req.body; // Para filho, inclua pai_id
+  const { tipo, nome_completo, email, senha, telefone, cpf, pai_id } = req.body;
   try {
     const client = await pool.connect();
     let query, params;
@@ -106,7 +123,7 @@ router.put('/user/password', checkAdmin, async (req, res) => {
 
 // Create table (SQL directo - PERIGOSO!)
 router.post('/db/create-table', checkAdmin, async (req, res) => {
-  const { sql } = req.body; // ex.: "CREATE TABLE test (id SERIAL PRIMARY KEY)"
+  const { sql } = req.body;
   try {
     const client = await pool.connect();
     await client.query(sql);
