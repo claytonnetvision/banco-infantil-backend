@@ -12,6 +12,7 @@ const missionRouter = require("./routes/missionRoutes");
 const passwordRouter = require("./routes/passwordRoutes");
 const desafiosRouter = require("./routes/desafios");
 const desafiosIARouter = require("./routes/desafiosIA");
+const adminRoutes = require("./routes/adminRoutes"); // Adicionado para área admin
 const { executarTarefasDiarias } = require("./Agendador");
 
 const app = express();
@@ -161,6 +162,11 @@ try {
     path.resolve(__dirname, "./routes/backend_escola_routes")
   );
   app.use("/auth/escola", escolaRoutes(pool));
+  console.log(
+    "Carregando roteador /admin:", // Adicionado
+    path.resolve(__dirname, "./routes/adminRoutes")
+  );
+  app.use("/admin", adminRoutes); // Adicionado para área admin
 
   console.log("Rotas carregadas com sucesso");
 } catch (error) {
