@@ -1,5 +1,4 @@
 const express = require('express');
-const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const router = express.Router();
 
@@ -30,10 +29,10 @@ const escolaRoutes = (pool) => {
       diretor, telefone_diretor, email_diretor, numero_alunos, series_oferecidas
     } = req.body;
 
-    // Validações
+    // Validações básicas
     if (!nome || !email || !senha || !telefone || !cnpj || !endereco || !cidade || !estado || !cep ||
         !diretor || !telefone_diretor || !email_diretor || !numero_alunos || !series_oferecidas || !series_oferecidas.length) {
-      return res.status(400).json({ error: 'Todos os campos são obrigatórios e devem ser válidos' });
+      return res.status(400).json({ error: 'Todos os campos são obrigatórios' });
     }
     if (!email.match(/^[\w-.]+@([\w-]+\.)+[\w-]{2,4}$/)) {
       return res.status(400).json({ error: 'Email institucional inválido' });
@@ -41,20 +40,8 @@ const escolaRoutes = (pool) => {
     if (senha.length < 6) {
       return res.status(400).json({ error: 'Senha deve ter pelo menos 6 caracteres' });
     }
-    if (!telefone.match(/^\(\d{2}\)\s\d{4,5}-\d{4}$/)) {
-      return res.status(400).json({ error: 'Telefone deve estar no formato (XX) XXXXX-XXXX' });
-    }
-    if (!cnpj.match(/^\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}$/)) {
-      return res.status(400).json({ error: 'CNPJ deve estar no formato XX.XXX.XXX/XXXX-XX' });
-    }
-    if (!cep.match(/^\d{5}-\d{3}$/)) {
-      return res.status(400).json({ error: 'CEP deve estar no formato XXXXX-XXX' });
-    }
     if (!email_diretor.match(/^[\w-.]+@([\w-]+\.)+[\w-]{2,4}$/)) {
       return res.status(400).json({ error: 'Email do diretor inválido' });
-    }
-    if (!telefone_diretor.match(/^\(\d{2}\)\s\d{4,5}-\d{4}$/)) {
-      return res.status(400).json({ error: 'Telefone do diretor deve estar no formato (XX) XXXXX-XXXX' });
     }
     if (numero_alunos <= 0) {
       return res.status(400).json({ error: 'Número de alunos deve ser maior que 0' });
@@ -73,10 +60,7 @@ const escolaRoutes = (pool) => {
           return res.status(400).json({ error: 'Email ou CNPJ já cadastrado' });
         }
 
-        // Criptografar senha
-        const hashedPassword = await bcrypt.hash(senha, 10);
-
-        // Inserir escola
+        // Inserir escola com senha em texto puro
         const insertEscolaQuery = `
           INSERT INTO escolas (nome, email, senha, telefone, cnpj, endereco, cidade, estado, cep, 
                               diretor, telefone_diretor, email_diretor, numero_alunos, status, data_cadastro)
@@ -84,7 +68,7 @@ const escolaRoutes = (pool) => {
           RETURNING id, nome, email, status
         `;
         const escolaResult = await client.query(insertEscolaQuery, [
-          nome, email, hashedPassword, telefone, cnpj, endereco, cidade, estado, cep,
+          nome, email, senha, telefone, cnpj, endereco, cidade, estado, cep,
           diretor, telefone_diretor, email_diretor, numero_alunos
         ]);
 
@@ -115,7 +99,7 @@ const escolaRoutes = (pool) => {
       } catch (error) {
         await client.query('ROLLBACK');
         console.error('Erro ao cadastrar escola:', error);
-        res.status(500).json({ error: 'Erro interno do servidor' });
+        res.status(500).json({ error: 'Erro interno do servidor', details: error.message });
       } finally {
         client.release();
       }
@@ -144,13 +128,12 @@ const escolaRoutes = (pool) => {
         }
 
         const escola = result.rows[0];
-        const senhaCorreta = await bcrypt.compare(senha, escola.senha);
-
-        if (!senhaCorreta) {
+        // Comparação direta da senha (sem bcrypt)
+        if (senha !== escola.senha) {
           return res.status(400).json({ error: 'Email ou senha incorretos' });
         }
 
-        // Removida a condição que rejeitava contas ativas
+        // Permitir login para contas ativas
         if (escola.status !== 'ativo') {
           return res.status(403).json({ error: `Conta está ${escola.status}. Entre em contato com o suporte.` });
         }
@@ -199,14 +182,13 @@ const escolaRoutes = (pool) => {
           return res.status(404).json({ error: 'Escola não encontrada' });
         }
 
-        const senhaCorreta = await bcrypt.compare(senha_atual, result.rows[0].senha);
-        if (!senhaCorreta) {
+        // Comparação direta da senha (sem bcrypt)
+        if (senha_atual !== result.rows[0].senha) {
           return res.status(400).json({ error: 'Senha atual incorreta' });
         }
 
-        const hashedNewPassword = await bcrypt.hash(nova_senha, 10);
         const updateQuery = 'UPDATE escolas SET senha = $1, data_atualizacao = CURRENT_TIMESTAMP WHERE id = $2';
-        await client.query(updateQuery, [hashedNewPassword, req.user.id]);
+        await client.query(updateQuery, [nova_senha, req.user.id]);
 
         res.json({ message: 'Senha alterada com sucesso' });
       } catch (error) {
@@ -745,8 +727,6 @@ const escolaRoutes = (pool) => {
         const materiaResult = await client.query(materiaQuery, materiaParams);
         relatorios.por_materia = materiaResult.rows;
 
-        // Aqui, você implementaria a lógica para gerar PDF ou Excel
-        // Por simplicidade, retornamos um JSON como placeholder
         res.setHeader('Content-Disposition', `attachment; filename=relatorio.${formato}`);
         res.json(relatorios); // Substitua por geração de PDF/Excel conforme necessário
       } catch (error) {

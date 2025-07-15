@@ -35,13 +35,19 @@ async function processarTarefasAutomaticas(client) {
       );
 
       if (tarefaExistente.rows.length === 0) {
+        const valorNumerico = parseFloat(tarefa.valor);
+        if (isNaN(valorNumerico)) {
+          console.error(`Valor inválido para tarefa ID ${tarefa.id}: ${tarefa.valor}`);
+          continue;
+        }
+
         await client.query(
           'INSERT INTO tarefas (filho_id, descricao, valor, status) VALUES ($1, $2, $3, $4)',
-          [tarefa.filho_id, tarefa.descricao, tarefa.valor, 'pendente']
+          [tarefa.filho_id, tarefa.descricao, valorNumerico, 'pendente']
         );
         await client.query(
           'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
-          [tarefa.filho_id, `Nova tarefa automática: ${tarefa.descricao} (R$ ${parseFloat(tarefa.valor).toFixed(2)})`, new Date()]
+          [tarefa.filho_id, `Nova tarefa automática: ${tarefa.descricao} (R$ ${valorNumerico.toFixed(2)})`, new Date()]
         );
         console.log(`Tarefa automática criada para filho ${tarefa.filho_id}: ${tarefa.descricao}`);
       } else {
@@ -50,6 +56,7 @@ async function processarTarefasAutomaticas(client) {
     }
   } catch (error) {
     console.error('Erro ao processar tarefas automáticas:', error.stack);
+    throw error; // Propaga o erro para o ROLLBACK na função principal
   } finally {
     console.log('Processando tarefas automáticas - Fim');
     isRunning = false;
@@ -89,32 +96,39 @@ async function processarMesadas(client) {
 
       const contaId = contaPaiResult.rows[0].id;
       const saldoPai = parseFloat(contaPaiResult.rows[0].saldo);
+      const valorMesada = parseFloat(mesada.valor);
 
-      if (saldoPai < mesada.valor) {
+      if (isNaN(valorMesada)) {
+        console.error(`Valor inválido para mesada ID ${mesada.id}: ${mesada.valor}`);
+        continue;
+      }
+
+      if (saldoPai < valorMesada) {
         console.log(`Saldo insuficiente para mesada de filho ${mesada.filho_id}`);
         continue;
       }
 
-      await client.query('UPDATE contas SET saldo = saldo - $1 WHERE id = $2', [mesada.valor, contaId]);
-      await client.query('UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2', [mesada.valor, mesada.filho_id]);
+      await client.query('UPDATE contas SET saldo = saldo - $1 WHERE id = $2', [valorMesada, contaId]);
+      await client.query('UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2', [valorMesada, mesada.filho_id]);
       await client.query(
         'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ($1, $2, $3, $4, $5)',
-        [contaId, 'transferencia', mesada.valor, `Mesada para filho ${mesada.filho_id}`, 'mesada']
+        [contaId, 'transferencia', valorMesada, `Mesada para filho ${mesada.filho_id}`, 'mesada']
       );
       await client.query(
         'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
-        [mesada.filho_id, `Você recebeu sua mesada de R$ ${mesada.valor.toFixed(2)}!`, new Date()]
+        [mesada.filho_id, `Você recebeu sua mesada de R$ ${valorMesada.toFixed(2)}!`, new Date()]
       );
       await client.query(
         `UPDATE objetivos 
          SET valor_atual = GREATEST(0, LEAST(valor_atual + $1, valor_total)) 
          WHERE filho_id = $2 AND status = 'pendente'`,
-        [mesada.valor, mesada.filho_id]
+        [valorMesada, mesada.filho_id]
       );
-      console.log(`Mesada processada para filho ${mesada.filho_id}: R$ ${mesada.valor}`);
+      console.log(`Mesada processada para filho ${mesada.filho_id}: R$ ${valorMesada.toFixed(2)}`);
     }
   } catch (error) {
     console.error('Erro ao processar mesadas:', error.stack);
+    throw error; // Propaga o erro para o ROLLBACK na função principal
   } finally {
     console.log('Processando mesadas - Fim');
     isRunning = false;
@@ -175,6 +189,7 @@ async function processarDesafiosAutomaticos(client) {
     }
   } catch (error) {
     console.error('Erro ao processar desafios automáticos:', error.stack);
+    throw error; // Propaga o erro para o ROLLBACK na função principal
   } finally {
     console.log('Processando desafios automáticos - Fim');
     isRunning = false;
@@ -271,6 +286,7 @@ async function processarDesafiosAutomaticos(client) {
 //     }
 //   } catch (error) {
 //     console.error('Erro ao processar desafios IA:', error.stack);
+//     throw error; // Propaga o erro para o ROLLBACK na função principal
 //   } finally {
 //     console.log('Processando desafios gerados por IA - Fim');
 //     isRunning = false;
@@ -293,7 +309,7 @@ async function processarMissoesDiarias(client) {
     for (const filho of filhosResult.rows) {
       console.log(`Processando missões para filho ${filho.id}`);
       const contaPaiResult = await client.query('SELECT id, saldo FROM contas WHERE pai_id = $1', [filho.pai_id]);
-      if (contaPaiResult.rows.length === 0 || contaPaiResult.rows[0].saldo < 0.80) {
+      if (contaPaiResult.rows.length === 0 || parseFloat(contaPaiResult.rows[0].saldo) < 0.80) {
         console.log(`Saldo insuficiente para missões diárias do filho ${filho.id}`);
         continue;
       }
@@ -332,6 +348,7 @@ async function processarMissoesDiarias(client) {
     }
   } catch (error) {
     console.error('Erro ao processar missões diárias:', error.stack);
+    throw error; // Propaga o erro para o ROLLBACK na função principal
   } finally {
     console.log('Processando missões diárias - Fim');
     isRunning = false;
@@ -396,6 +413,7 @@ async function processarTrofeusDiarios(client) {
     }
   } catch (error) {
     console.error('Erro ao processar troféus diários:', error.stack);
+    throw error; // Propaga o erro para o ROLLBACK na função principal
   } finally {
     console.log('Processando troféus diários - Fim');
     isRunning = false;
@@ -436,6 +454,7 @@ async function buscarDesafios(tipoDesafios) {
           })));
         } finally {
           client.release();
+          console.log('Conexão liberada para pool:', client.processID);
         }
       }
     }
@@ -486,9 +505,11 @@ async function executarTarefasDiarias() {
     } else {
       console.error(`Erro na execução diária #${executionId}: sem cliente para rollback`, error.stack);
     }
+    throw error; // Propaga o erro para o chamador
   } finally {
     if (client) {
       client.release();
+      console.log(`Conexão liberada para pool: ${client.processID}`);
       console.log(`Execução diária #${executionId} finalizada às ${new Date().toISOString()}`);
     }
   }

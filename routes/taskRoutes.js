@@ -628,6 +628,10 @@ router.delete('/tarefas-automaticas/:id', async (req, res) => {
 
       const filhoId = tarefaExistente.rows[0].filho_id;
 
+      // Deletar tarefas associadas primeiro
+      await client.query('DELETE FROM tarefas WHERE tarefa_automatica_id = $1', [id]);
+
+      // Agora deletar a tarefa automática
       await client.query('DELETE FROM tarefas_automaticas WHERE id = $1', [id]);
 
       await client.query(
@@ -891,12 +895,13 @@ router.get('/monitoramento/:filhoId', async (req, res) => {
     try {
       await client.query('SET search_path TO banco_infantil');
       const tarefasResult = await client.query(
-        'SELECT t.id, t.descricao, t.valor, t.data_criacao as data FROM tarefas t WHERE t.filho_id = $1 AND t.status = $2 ORDER BY t.data_criacao DESC',
+        `SELECT t.id, t.descricao, t.valor, t.data_criacao as data FROM tarefas 
+         WHERE t.filho_id = $1 AND t.status = $2 ORDER BY t.data_criacao DESC`,
         [parseInt(filhoId), 'aprovada']
       );
 
       const transacoesResult = await client.query(
-        'SELECT t.id, t.tipo, t.valor, t.descricao, t.data_criacao as data FROM transacoes t JOIN contas c ON t.conta_id = c.id JOIN filhos f ON f.pai_id = c.pai_id WHERE f.id = $1 AND t.descricao LIKE \'%\' || f.id || \'%\' ORDER BY t.data_criacao DESC',
+        `SELECT t.id, t.tipo, t.valor, t.descricao, t.data_criacao as data FROM transacoes t JOIN contas c ON t.conta_id = c.id JOIN filhos f ON f.pai_id = c.pai_id WHERE f.id = $1 AND t.descricao LIKE '%' || f.id || '%' ORDER BY t.data_criacao DESC`,
         [parseInt(filhoId)]
       );
 

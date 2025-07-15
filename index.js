@@ -1,19 +1,19 @@
-require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
 const { Pool } = require("pg");
-const { upload } = require("./upload");
-const desafiosRouter = require("./routes/desafios");
-const desafiosIARouter = require("./routes/desafiosIA");
+require("dotenv").config();
+const escolaRoutes = require("./routes/backend_escola_routes");
 const authRouter = require("./routes/authRoutes");
 const userRouter = require("./routes/userRoutes");
 const accountRouter = require("./routes/accountRoutes");
 const taskRouter = require("./routes/taskRoutes");
 const missionRouter = require("./routes/missionRoutes");
 const passwordRouter = require("./routes/passwordRoutes");
-const escolaRoutes = require("./backend_escola_routes"); // Importa as rotas da escola
+const desafiosRouter = require("./routes/desafios");
+const desafiosIARouter = require("./routes/desafiosIA");
 const { executarTarefasDiarias } = require("./Agendador");
+
 const app = express();
 
 // Definir API_URL via variável de ambiente
@@ -30,18 +30,21 @@ app.use((req, res, next) => {
   next();
 });
 
-// Configuração do pool de conexão com retry e timeout
+// Configuração do pool de conexão com retry e timeout aumentado
 const pool = new Pool({
   user: process.env.DB_USER || "neondb_owner",
   host: process.env.DB_HOST || "ep-rapid-flower-act74795-pooler.sa-east-1.aws.neon.tech",
-  database: process.env.DB_NAME || "banco_infantil",
+  database: process.env.DB_DATABASE || "banco_infantil",
   password: process.env.DB_PASSWORD || "npg_CdlWZyu1D0rR",
   port: process.env.DB_PORT || "5432",
-  ssl: { rejectUnauthorized: false },
-  max: 10,
+  ssl: {
+    require: true,
+    rejectUnauthorized: true // Configuração recomendada para Neon
+  },
+  max: 20, // Aumentado para suportar mais conexões simultâneas
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 10000,
-  maxUses: 1000,
+  connectionTimeoutMillis: 30000,
+  query: 'SET search_path TO banco_infantil'
 });
 
 // Log de eventos do pool
@@ -56,7 +59,7 @@ pool.on("remove", (client) =>
 pool.on("error", async (err, client) => {
   console.error(
     "Erro no pool:",
-    err,
+    err.message,
     "Cliente:",
     client ? client.processID : "desconhecido"
   );
@@ -66,7 +69,7 @@ pool.on("error", async (err, client) => {
     await pool.connect();
     console.log("Reconexão bem-sucedida");
   } catch (reconnectErr) {
-    console.error("Erro ao reconectar:", reconnectErr);
+    console.error("Erro ao reconectar:", reconnectErr.message);
   }
 });
 
@@ -100,10 +103,13 @@ async function initializeDatabase() {
     const testResult = await client.query("SELECT NOW()");
     console.log("Query de teste bem-sucedida:", testResult.rows);
   } catch (error) {
-    console.error("Erro ao inicializar conexão com o banco:", error.stack);
+    console.error("Erro ao inicializar conexão com o banco:", error.message);
     process.exit(1);
   } finally {
-    if (client) client.release();
+    if (client) {
+      client.release();
+      console.log("Conexão liberada para pool:", client.processID);
+    }
   }
 }
 
@@ -150,9 +156,11 @@ try {
     path.resolve(__dirname, "./routes/passwordRoutes")
   );
   app.use("/alterar-senha", passwordRouter);
-
-  // Alterado para /auth/escola em vez de /api/escola
-  app.use("/auth/escola", escolaRoutes(pool)); 
+  console.log(
+    "Carregando roteador /auth/escola:",
+    path.resolve(__dirname, "./routes/backend_escola_routes")
+  );
+  app.use("/auth/escola", escolaRoutes(pool));
 
   console.log("Rotas carregadas com sucesso");
 } catch (error) {
@@ -192,13 +200,14 @@ app.delete("/admin/limpar-dados/:filhoId", async (req, res) => {
       res.json({ message: "Dados limpos com sucesso" });
     } catch (err) {
       await client.query("ROLLBACK");
-      console.error("Erro ao limpar dados:", err.stack);
+      console.error("Erro ao limpar dados:", err.message);
       res.status(500).json({ error: "Erro interno ao limpar dados", details: err.message });
     } finally {
       client.release();
+      console.log("Conexão liberada para pool:", client.processID);
     }
   } catch (err) {
-    console.error("Erro na conexão ao limpar dados:", err.stack);
+    console.error("Erro na conexão ao limpar dados:", err.message);
     res.status(500).json({ error: "Erro interno ao limpar dados", details: err.message });
   }
 });
@@ -232,13 +241,14 @@ app.delete("/desafios/conjunto/:conjuntoId", async (req, res) => {
       res.json({ message: "Conjunto excluído com sucesso" });
     } catch (err) {
       await client.query("ROLLBACK");
-      console.error("Erro ao excluir conjunto:", err.stack);
+      console.error("Erro ao excluir conjunto:", err.message);
       res.status(500).json({ error: "Erro ao excluir conjunto", details: err.message });
     } finally {
       client.release();
+      console.log("Conexão liberada para pool:", client.processID);
     }
   } catch (err) {
-    console.error("Erro na conexão ao excluir conjunto:", err.stack);
+    console.error("Erro na conexão ao excluir conjunto:", err.message);
     res.status(500).json({ error: "Erro interno ao excluir conjunto", details: err.message });
   }
 });
@@ -246,7 +256,7 @@ app.delete("/desafios/conjunto/:conjuntoId", async (req, res) => {
 // Middleware de erro
 app.use((err, req, res, next) => {
   console.error(
-    `Erro na requisição: ${req.method} ${req.url} - Origem: ${req.ip} - Data: ${new Date().toISOString()} - Stack: ${err.stack}`
+    `Erro na requisição: ${req.method} ${req.url} - Origem: ${req.ip} - Data: ${new Date().toISOString()} - Erro: ${err.message}`
   );
   res.status(500).json({ error: "Erro interno do servidor", details: err.message });
 });
@@ -266,9 +276,16 @@ async function startServer() {
   app.listen(PORT, () => {
     console.log(`Servidor rodando na porta ${PORT}`);
     executarTarefasDiarias();
+  }).on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`Erro: Porta ${PORT} já está em uso. Tente outra porta ou libere a porta ${PORT}.`);
+    } else {
+      console.error('Erro ao iniciar o servidor:', err.message);
+    }
+    process.exit(1);
   });
 }
 
 startServer().catch((err) =>
-  console.error("Falha ao iniciar o servidor:", err.stack)
+  console.error("Falha ao iniciar o servidor:", err.message)
 );

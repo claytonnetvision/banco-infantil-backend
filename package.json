@@ -20,7 +20,8 @@
     "child_process": "^1.0.2",
     "cors": "^2.8.5",
     "crypto": "^1.0.1",
-    "dotenv": "^16.5.0",
+    "dotenv": "^16.6.1",
+    "exceljs": "^4.4.0",
     "express": "^4.21.2",
     "fs": "^0.0.1-security",
     "jsonwebtoken": "^9.0.2",
@@ -28,6 +29,7 @@
     "multer": "^1.4.5-lts.1",
     "node-cron": "^4.1.1",
     "path": "^0.12.7",
+    "pdfkit": "^0.17.1",
     "pg": "^8.16.3",
     "react-chartjs-2": "^5.3.0"
   }
