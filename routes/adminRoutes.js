@@ -36,15 +36,19 @@ router.get('/users', checkAdmin, async (req, res) => {
     try {
       await client.query('SET search_path TO banco_infantil');
       console.log('Consultando tabelas pais e filhos...');
-      // Adicionar IF NOT EXISTS para tipo, evitando erro se a coluna não existir
+      // Usar COALESCE para evitar erro se tipo não existir
       const paisResult = await client.query(
         'SELECT id, nome_completo, email, senha, COALESCE(tipo, \'pai\') AS tipo FROM pais'
       );
       const filhosResult = await client.query(
         'SELECT id, nome_completo, email, senha, COALESCE(tipo, \'filho\') AS tipo FROM filhos'
       );
+      console.log('Resultados brutos:', {
+        paisRows: paisResult.rows,
+        filhosRows: filhosResult.rows,
+      });
       const allUsers = [...paisResult.rows, ...filhosResult.rows];
-      console.log('Consulta concluída:', { totalUsers: allUsers.length, paisRows: paisResult.rowCount, filhosRows: filhosResult.rowCount });
+      console.log('Consulta concluída:', { totalUsers: allUsers.length });
       if (allUsers.length === 0) {
         return res.status(200).json({ users: [], message: 'Nenhum usuário encontrado' });
       }
