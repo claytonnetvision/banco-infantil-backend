@@ -12,16 +12,22 @@ const missionRouter = require("./routes/missionRoutes");
 const passwordRouter = require("./routes/passwordRoutes");
 const desafiosRouter = require("./routes/desafios");
 const desafiosIARouter = require("./routes/desafiosIA");
-const adminRoutes = require("./routes/adminRoutes"); // Adicionado para área admin
+const adminRoutes = require("./routes/adminRoutes");
 const { executarTarefasDiarias } = require("./Agendador");
 
 const app = express();
 
-// Definir API_URL via variável de ambiente
+// Definir API_URL via variável de ambiente (usada para logs ou configurações internas)
 const API_URL = process.env.API_URL || "http://localhost:5000";
+console.log(`API_URL configurada como: ${API_URL}`);
 
-// Configuração do CORS - Permitir todas as origens
-app.use(cors());
+// Configuração do CORS - Dinâmico com base no ambiente
+const corsOptions = {
+  origin: API_URL === "http://localhost:5000" ? "http://localhost:3000" : process.env.FRONTEND_URL || "https://seu-frontend.vercel.app", // Ajuste o domínio do Vercel
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  credentials: true
+};
+app.use(cors(corsOptions));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -42,7 +48,7 @@ const pool = new Pool({
     require: true,
     rejectUnauthorized: true // Configuração recomendada para Neon
   },
-  max: 20, // Aumentado para suportar mais conexões simultâneas
+  max: 20,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 30000,
   query: 'SET search_path TO banco_infantil'
@@ -50,20 +56,10 @@ const pool = new Pool({
 
 // Log de eventos do pool
 pool.on("connect", () => console.log("Nova conexão ao banco estabelecida"));
-pool.on("acquire", (client) =>
-  console.log("Cliente adquirido do pool:", client.processID)
-);
-pool.on("remove", (client) =>
-  console.log("Cliente removido do pool:", client.processID)
-);
-
+pool.on("acquire", (client) => console.log("Cliente adquirido do pool:", client.processID));
+pool.on("remove", (client) => console.log("Cliente removido do pool:", client.processID));
 pool.on("error", async (err, client) => {
-  console.error(
-    "Erro no pool:",
-    err.message,
-    "Cliente:",
-    client ? client.processID : "desconhecido"
-  );
+  console.error("Erro no pool:", err.message, "Cliente:", client ? client.processID : "desconhecido");
   try {
     await pool.end();
     console.log("Pool encerrado, tentando reconectar...");
@@ -76,16 +72,20 @@ pool.on("error", async (err, client) => {
 
 // Middleware para log de requisições
 app.use((req, res, next) => {
-  console.log(
-    `Requisição recebida: ${req.method} ${req.url} - Origem: ${req.ip} - Data: ${new Date().toISOString()}`
-  );
+  console.log(`Requisição recebida: ${req.method} ${req.url} - Origem: ${req.ip} - Data: ${new Date().toISOString()}`);
   next();
 });
 
 // Servir arquivos de upload
 app.use("/Uploads", express.static(path.join(__dirname, "Uploads"), {
   setHeaders: (res, path) => {
-    res.set("Content-Type", "image/jpeg");
+    const ext = path.split('.').pop().toLowerCase();
+    const mimeTypes = {
+      'png': 'image/png',
+      'jpg': 'image/jpeg',
+      'jpeg': 'image/jpeg'
+    };
+    res.set("Content-Type", mimeTypes[ext] || 'application/octet-stream');
   },
   fallthrough: true,
 }));
@@ -117,56 +117,26 @@ async function initializeDatabase() {
 // Usar roteadores com caminhos distintos
 console.log("Carregando rotas");
 try {
-  console.log(
-    "Carregando roteador /auth:",
-    path.resolve(__dirname, "./routes/authRoutes")
-  );
+  console.log("Carregando roteador /auth:", path.resolve(__dirname, "./routes/authRoutes"));
   app.use("/auth", authRouter);
-  console.log(
-    "Carregando roteador /desafios:",
-    path.resolve(__dirname, "./routes/desafios")
-  );
+  console.log("Carregando roteador /desafios:", path.resolve(__dirname, "./routes/desafios"));
   app.use("/desafios", desafiosRouter);
-  console.log(
-    "Carregando roteador /desafios/ia:",
-    path.resolve(__dirname, "./routes/desafiosIA")
-  );
+  console.log("Carregando roteador /desafios/ia:", path.resolve(__dirname, "./routes/desafiosIA"));
   app.use("/desafios/ia", desafiosIARouter);
-  console.log(
-    "Carregando roteador /user:",
-    path.resolve(__dirname, "./routes/userRoutes")
-  );
+  console.log("Carregando roteador /user:", path.resolve(__dirname, "./routes/userRoutes"));
   app.use("/user", userRouter);
-  console.log(
-    "Carregando roteador /account:",
-    path.resolve(__dirname, "./routes/accountRoutes")
-  );
+  console.log("Carregando roteador /account:", path.resolve(__dirname, "./routes/accountRoutes"));
   app.use("/account", accountRouter);
-  console.log(
-    "Carregando roteador /task:",
-    path.resolve(__dirname, "./routes/taskRoutes")
-  );
+  console.log("Carregando roteador /task:", path.resolve(__dirname, "./routes/taskRoutes"));
   app.use("/task", taskRouter);
-  console.log(
-    "Carregando roteador /mission:",
-    path.resolve(__dirname, "./routes/missionRoutes")
-  );
+  console.log("Carregando roteador /mission:", path.resolve(__dirname, "./routes/missionRoutes"));
   app.use("/mission", missionRouter);
-  console.log(
-    "Carregando roteador /alterar-senha:",
-    path.resolve(__dirname, "./routes/passwordRoutes")
-  );
+  console.log("Carregando roteador /alterar-senha:", path.resolve(__dirname, "./routes/passwordRoutes"));
   app.use("/alterar-senha", passwordRouter);
-  console.log(
-    "Carregando roteador /auth/escola:",
-    path.resolve(__dirname, "./routes/backend_escola_routes")
-  );
+  console.log("Carregando roteador /auth/escola:", path.resolve(__dirname, "./routes/backend_escola_routes"));
   app.use("/auth/escola", escolaRoutes(pool));
-  console.log(
-    "Carregando roteador /admin:", // Adicionado
-    path.resolve(__dirname, "./routes/adminRoutes")
-  );
-  app.use("/admin", adminRoutes); // Adicionado para área admin
+  console.log("Carregando roteador /admin:", path.resolve(__dirname, "./routes/adminRoutes"));
+  app.use("/admin", adminRoutes);
 
   console.log("Rotas carregadas com sucesso");
 } catch (error) {
