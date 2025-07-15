@@ -46,7 +46,7 @@ const pool = new Pool({
   port: process.env.DB_PORT || "5432",
   ssl: {
     require: true,
-    rejectUnauthorized: true // Configuração recomendada para Neon
+    rejectUnauthorized: false // Temporário para debug, ajuste para true em produção
   },
   max: 20,
   idleTimeoutMillis: 30000,
