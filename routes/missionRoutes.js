@@ -40,6 +40,7 @@ cron.schedule('0 0 * * *', async () => {
     if (client) client.release();
   }
 });
+
 // Tarefa agendada para excluir análises antigas (7 dias)
 cron.schedule('0 0 * * *', async () => {
   console.log('Executando limpeza de análises psicológicas antigas:', new Date().toISOString());
@@ -62,6 +63,7 @@ cron.schedule('0 0 * * *', async () => {
     if (client) client.release();
   }
 });
+
 // Endpoint para configurar mesada
 router.post('/mesada', async (req, res) => {
   console.log('Requisição recebida em /mesada:', req.body);
@@ -812,8 +814,8 @@ router.post('/missao/time-familiar', async (req, res) => {
 
     const client = await pool.connect();
     try {
-      await client.query('SET search_path TO banco_infantil');
       await client.query('BEGIN');
+      await client.query('SET search_path TO banco_infantil');
 
       const filhoResult = await client.query('SELECT id, pai_id FROM filhos WHERE id = $1 AND pai_id = $2', [parseInt(filho_id), parseInt(pai_id)]);
       if (filhoResult.rows.length === 0) {
@@ -911,8 +913,7 @@ router.post('/missao/resumo-livro', async (req, res) => {
       res.status(201).json({ missao: result.rows[0], message: 'Missão "Resumo de Livro" enviada para aprovação!' });
     } catch (error) {
       await client.query('ROLLBACK');
-      console.error('Erro ao submeter missão "Resumo de Livro":', error.stack);
-      res.status(500).json({ error: 'Erro ao submeter missão', details: error.message });
+      throw error;
     } finally {
       client.release();
     }
@@ -1222,9 +1223,9 @@ router.post('/gerar-relatorio-pdf', async (req, res) => {
       // Conteúdo da Missão
       doc.text('Conteúdo da Missão', 10, y);
       y += 10;
-      const descricaoLines = doc.splitTextToSize(`Descrição da Criança: ${missaoData.descricao || 'Nenhuma descrição fornecida'}`, 180); // 180 é a largura aproximada da página
+      const descricaoLines = doc.splitTextToSize(`Descrição da Criança: ${missaoData.descricao || 'Nenhuma descrição fornecida'}`, 180);
       doc.text(descricaoLines, 10, y);
-      y += descricaoLines.length * 7; // Ajusta o espaçamento com base no número de linhas
+      y += descricaoLines.length * 7;
       if (missaoData.imagem) {
         doc.text(`Imagem: http://localhost:5000${missaoData.imagem}`, 10, y);
         y += 10;
@@ -1395,6 +1396,7 @@ router.delete('/missao/:id', async (req, res) => {
     res.status(500).json({ error: 'Erro ao excluir missão', details: error.message });
   }
 });
+
 // Endpoint para excluir análise psicológica
 router.delete('/analise/:id', async (req, res) => {
   console.log('Requisição recebida em /analise/:id:', req.params.id);
@@ -1435,4 +1437,5 @@ router.delete('/analise/:id', async (req, res) => {
     res.status(500).json({ error: 'Erro ao excluir análise', details: error.message });
   }
 });
+
 module.exports = router;

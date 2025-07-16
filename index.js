@@ -17,11 +17,11 @@ const { executarTarefasDiarias } = require("./Agendador");
 
 const app = express();
 
-// Definir API_URL via variável de ambiente (usada para logs ou configurações internas)
+// Definir API_URL via variável de ambiente
 const API_URL = process.env.API_URL || "http://localhost:5000";
 console.log(`API_URL configurada como: ${API_URL}`);
 
-// Configuração do CORS - Suportar múltiplos origens
+// Configuração do CORS
 const allowedOrigins = [
   'http://localhost:3000', // Frontend local
   process.env.FRONTEND_URL || 'https://www.tarefinhapaga.com.br' // Frontend em produção
@@ -29,7 +29,6 @@ const allowedOrigins = [
 
 const corsOptions = {
   origin: (origin, callback) => {
-    // Permitir requisições sem origem (ex.: Postman) ou de origens permitidas
     if (!origin || allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
@@ -46,13 +45,13 @@ app.use(cors(corsOptions));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Garantir UTF-8 em todas as respostas
+// Garantir UTF-8
 app.use((req, res, next) => {
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   next();
 });
 
-// Configuração do pool de conexão com retry e timeout aumentado
+// Configuração do pool
 const pool = new Pool({
   user: process.env.DB_USER || "neondb_owner",
   host: process.env.DB_HOST || "ep-rapid-flower-act74795-pooler.sa-east-1.aws.neon.tech",
@@ -61,13 +60,16 @@ const pool = new Pool({
   port: process.env.DB_PORT || "5432",
   ssl: {
     require: true,
-    rejectUnauthorized: false // Temporário para debug, ajuste para true em produção
+    rejectUnauthorized: process.env.NODE_ENV === 'production' // false para local, true para produção
   },
   max: 20,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 30000,
   query: 'SET search_path TO banco_infantil'
 });
+
+// Armazenar o pool no app para uso nas rotas
+app.set('pool', pool);
 
 // Log de eventos do pool
 pool.on("connect", () => console.log("Nova conexão ao banco estabelecida"));
@@ -109,7 +111,7 @@ app.use("/Uploads", (req, res) => {
   res.status(404).json({ error: "Arquivo não encontrado" });
 });
 
-// Testar conexão com o banco uma única vez
+// Testar conexão com o banco
 async function initializeDatabase() {
   let client;
   try {
@@ -129,30 +131,19 @@ async function initializeDatabase() {
   }
 }
 
-// Usar roteadores com caminhos distintos
+// Usar roteadores
 console.log("Carregando rotas");
 try {
-  console.log("Carregando roteador /auth:", path.resolve(__dirname, "./routes/authRoutes"));
   app.use("/auth", authRouter);
-  console.log("Carregando roteador /desafios:", path.resolve(__dirname, "./routes/desafios"));
   app.use("/desafios", desafiosRouter);
-  console.log("Carregando roteador /desafios/ia:", path.resolve(__dirname, "./routes/desafiosIA"));
   app.use("/desafios/ia", desafiosIARouter);
-  console.log("Carregando roteador /user:", path.resolve(__dirname, "./routes/userRoutes"));
   app.use("/user", userRouter);
-  console.log("Carregando roteador /account:", path.resolve(__dirname, "./routes/accountRoutes"));
   app.use("/account", accountRouter);
-  console.log("Carregando roteador /task:", path.resolve(__dirname, "./routes/taskRoutes"));
   app.use("/task", taskRouter);
-  console.log("Carregando roteador /mission:", path.resolve(__dirname, "./routes/missionRoutes"));
   app.use("/mission", missionRouter);
-  console.log("Carregando roteador /alterar-senha:", path.resolve(__dirname, "./routes/passwordRoutes"));
   app.use("/alterar-senha", passwordRouter);
-  console.log("Carregando roteador /auth/escola:", path.resolve(__dirname, "./routes/backend_escola_routes"));
   app.use("/auth/escola", escolaRoutes(pool));
-  console.log("Carregando roteador /admin:", path.resolve(__dirname, "./routes/adminRoutes"));
   app.use("/admin", adminRoutes);
-
   console.log("Rotas carregadas com sucesso");
 } catch (error) {
   console.error("Erro ao configurar rotas:", error.message, error.stack);
