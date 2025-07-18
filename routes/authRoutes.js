@@ -24,7 +24,7 @@ router.post('/login', async (req, res) => {
 
       // Verificar se é um responsável (pai)
       let userResult = await client.query(
-        'SELECT id, nome_completo, email FROM pais WHERE email = $1 AND senha = $2',
+        'SELECT id, nome_completo, email, senha FROM pais WHERE email = $1 AND senha = $2',
         [email, senha]
       );
 
@@ -34,7 +34,7 @@ router.post('/login', async (req, res) => {
       } else {
         // Verificar se é uma criança (filho)
         userResult = await client.query(
-          'SELECT id, nome_completo, email, pai_id, icone, background, chave_pix FROM filhos WHERE email = $1 AND senha = $2',
+          'SELECT id, nome_completo, email, senha, pai_id, icone, background, chave_pix FROM filhos WHERE email = $1 AND senha = $2',
           [email, senha]
         );
         if (userResult.rows.length > 0) {
@@ -153,17 +153,20 @@ router.post('/cadastro', async (req, res) => {
   }
 });
 
-// Nova rota para alterar senha (sem criptografia)
+// Rota para alterar senha sem criptografia
 router.post('/alterar-senha', async (req, res) => {
-  console.log('Requisição recebida em /alterar-senha:', req.body);
-  const { email, novaSenha, tipo } = req.body;
+  console.log('Requisição recebida em /auth/alterar-senha:', req.body);
+  const { email, nova_senha, tipo } = req.body;
 
   try {
-    if (!email || !novaSenha || !tipo) {
-      return res.status(400).json({ error: 'Dados incompletos' });
+    if (!email || !nova_senha || !tipo) {
+      return res.status(400).json({ error: 'Email, nova senha e tipo são obrigatórios' });
     }
-    if (novaSenha.length < 6) {
-      return res.status(400).json({ error: 'Senha deve ter pelo menos 6 caracteres' });
+    if (nova_senha.length < 6) {
+      return res.status(400).json({ error: 'Nova senha deve ter pelo menos 6 caracteres' });
+    }
+    if (!['pai', 'filho'].includes(tipo)) {
+      return res.status(400).json({ error: 'Tipo deve ser "pai" ou "filho"' });
     }
 
     const client = await pool.connect();
@@ -171,14 +174,14 @@ router.post('/alterar-senha', async (req, res) => {
       await client.query('BEGIN');
       await client.query('SET search_path TO banco_infantil');
 
-      let table = tipo === 'pai' ? 'pais' : 'filhos';
+      const table = tipo === 'pai' ? 'pais' : 'filhos';
       const userResult = await client.query(`SELECT id FROM ${table} WHERE email = $1`, [email]);
       if (userResult.rows.length === 0) {
         await client.query('ROLLBACK');
         return res.status(404).json({ error: 'Usuário não encontrado' });
       }
 
-      await client.query(`UPDATE ${table} SET senha = $1 WHERE email = $2`, [novaSenha, email]);
+      await client.query(`UPDATE ${table} SET senha = $1 WHERE email = $2`, [nova_senha, email]);
 
       await client.query('COMMIT');
       res.json({ message: 'Senha alterada com sucesso!' });
@@ -190,7 +193,7 @@ router.post('/alterar-senha', async (req, res) => {
     }
   } catch (error) {
     console.error('Erro ao alterar senha:', error.stack);
-    res.status(500).json({ error: 'Erro ao alterar senha' });
+    res.status(500).json({ error: 'Erro ao alterar senha', details: error.message });
   }
 });
 

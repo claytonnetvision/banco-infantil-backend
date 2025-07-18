@@ -9,7 +9,6 @@ const userRouter = require("./routes/userRoutes");
 const accountRouter = require("./routes/accountRoutes");
 const taskRouter = require("./routes/taskRoutes");
 const missionRouter = require("./routes/missionRoutes");
-const passwordRouter = require("./routes/passwordRoutes");
 const desafiosRouter = require("./routes/desafios");
 const desafiosIARouter = require("./routes/desafiosIA");
 const adminRoutes = require("./routes/adminRoutes");
@@ -17,7 +16,7 @@ const { executarTarefasDiarias } = require("./Agendador");
 
 const app = express();
 
-// Definir API_URL via variável de ambiente
+// Definir API_URL via variável de ambiente (ajustado para produção)
 const API_URL = process.env.API_URL || "http://localhost:5000";
 console.log(`API_URL configurada como: ${API_URL}`);
 
@@ -141,7 +140,7 @@ try {
   app.use("/account", accountRouter);
   app.use("/task", taskRouter);
   app.use("/mission", missionRouter);
-  app.use("/alterar-senha", passwordRouter);
+  // Remover passwordRouter, pois /alterar-senha será tratado por authRouter
   app.use("/auth/escola", escolaRoutes(pool));
   app.use("/admin", adminRoutes);
   console.log("Rotas carregadas com sucesso");
