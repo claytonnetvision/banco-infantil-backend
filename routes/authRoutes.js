@@ -24,7 +24,7 @@ router.post('/login', async (req, res) => {
 
       // Verificar se é um responsável (pai)
       let userResult = await client.query(
-        'SELECT id, nome_completo, email, senha FROM pais WHERE email = $1 AND senha = $2',
+        'SELECT id, nome_completo, email, senha, data_criacao FROM pais WHERE email = $1 AND senha = $2',
         [email, senha]
       );
 
@@ -34,7 +34,7 @@ router.post('/login', async (req, res) => {
       } else {
         // Verificar se é uma criança (filho)
         userResult = await client.query(
-          'SELECT id, nome_completo, email, senha, pai_id, icone, background, chave_pix FROM filhos WHERE email = $1 AND senha = $2',
+          'SELECT id, nome_completo, email, senha, pai_id, icone, background, chave_pix, data_criacao FROM filhos WHERE email = $1 AND senha = $2',
           [email, senha]
         );
         if (userResult.rows.length > 0) {
@@ -49,7 +49,7 @@ router.post('/login', async (req, res) => {
 
       // Gerar token JWT
       const token = jwt.sign(
-        { id: user.id, tipo: user.tipo, email: user.email },
+        { id: user.id, tipo: user.tipo, email: user.email, data_criacao: user.data_criacao },
         JWT_SECRET,
         { expiresIn: '1h' }
       );
@@ -100,7 +100,7 @@ router.post('/cadastro', async (req, res) => {
 
       // Cadastrar responsável (senha em texto puro)
       const paiResult = await client.query(
-        'INSERT INTO pais (nome_completo, email, senha, telefone, cpf) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+        'INSERT INTO pais (nome_completo, email, senha, telefone, cpf, data_criacao) VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP) RETURNING id',
         [pai.nome_completo, pai.email, pai.senha, pai.telefone, pai.cpf]
       );
       const paiId = paiResult.rows[0].id;
@@ -113,7 +113,7 @@ router.post('/cadastro', async (req, res) => {
 
       // Cadastrar criança (senha em texto puro)
       const filhoResult = await client.query(
-        'INSERT INTO filhos (pai_id, nome_completo, email, senha, telefone, icone) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
+        'INSERT INTO filhos (pai_id, nome_completo, email, senha, telefone, icone, data_criacao) VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP) RETURNING id',
         [paiId, filho.nome_completo, filho.email, filho.senha, filho.telefone, filho.icone || 'default.png']
       );
       const filhoId = filhoResult.rows[0].id;
@@ -131,10 +131,11 @@ router.post('/cadastro', async (req, res) => {
         id: paiId,
         nome_completo: pai.nome_completo,
         email: pai.email,
-        tipo: 'pai'
+        tipo: 'pai',
+        data_criacao: new Date()
       };
       const token = jwt.sign(
-        { id: user.id, tipo: user.tipo, email: user.email },
+        { id: user.id, tipo: user.tipo, email: user.email, data_criacao: user.data_criacao },
         JWT_SECRET,
         { expiresIn: '1h' }
       );
