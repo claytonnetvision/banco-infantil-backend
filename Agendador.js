@@ -469,6 +469,39 @@ async function buscarDesafios(tipoDesafios) {
   }
 }
 
+// Processar expiração de desafios criativos
+async function processarExpiracaoDesafios(client) {
+  if (isRunning) {
+    console.warn('Processamento de expiração de desafios já em andamento, pulando execução...');
+    return;
+  }
+  isRunning = true;
+  console.log('Processando expiração de desafios - Início');
+  try {
+    await client.query('SET search_path TO banco_infantil');
+    const deletedRows = await client.query(
+  'DELETE FROM banco_infantil.resultados_desafios_criativos WHERE data_expiracao < CURRENT_TIMESTAMP RETURNING *'
+);
+    if (deletedRows.rowCount > 0) {
+      console.log(`Excluídos ${deletedRows.rowCount} resultados expirados`);
+      for (const row of deletedRows.rows) {
+        await client.query(
+          'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
+          [row.filho_id, `Seu resultado do desafio ${row.desafio_id} foi expirado e excluído.`, new Date()]
+        );
+      }
+    } else {
+      console.log('Nenhum resultado expirado encontrado');
+    }
+  } catch (error) {
+    console.error('Erro ao processar expiração de desafios:', error.stack);
+    throw error;
+  } finally {
+    console.log('Processando expiração de desafios - Fim');
+    isRunning = false;
+  }
+}
+
 // Função principal para executar tarefas diárias
 async function executarTarefasDiarias() {
   if (!pool) {
@@ -497,6 +530,9 @@ async function executarTarefasDiarias() {
     console.log(`[${executionId}] Iniciando processarTrofeusDiarios`);
     await processarTrofeusDiarios(client);
     console.log(`[${executionId}] Finalizando processarTrofeusDiarios`);
+    console.log(`[${executionId}] Iniciando processarExpiracaoDesafios`);
+    await processarExpiracaoDesafios(client);
+    console.log(`[${executionId}] Finalizando processarExpiracaoDesafios`);
     await client.query('COMMIT');
   } catch (error) {
     if (client) {

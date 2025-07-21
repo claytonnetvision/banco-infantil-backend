@@ -512,6 +512,38 @@ router.post('/missoes-diarias/:id/concluir', async (req, res) => {
   }
 });
 
+// Novo endpoint para listar missões diárias por filhoId
+router.get('/missoes-diarias/:filhoId', async (req, res) => {
+  console.log('Requisição recebida em /missoes-diarias/:filhoId:', req.params.filhoId);
+  const { filhoId } = req.params;
+
+  try {
+    if (!req.headers.authorization) {
+      console.log('Erro: Nenhum token de autorização fornecido');
+      return res.status(401).json({ error: 'Não autorizado' });
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('SET search_path TO banco_infantil');
+      const result = await client.query(
+        'SELECT * FROM missoes_diarias WHERE filho_id = $1 AND status = $2 ORDER BY data_criacao DESC',
+        [parseInt(filhoId), 'pendente']
+      );
+      console.log('Missões diárias encontradas:', result.rows);
+      res.status(200).json({ missoes: result.rows });
+    } catch (error) {
+      console.error('Erro ao listar missões diárias:', error.stack);
+      res.status(500).json({ error: 'Erro ao listar missões diárias', details: error.message });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Erro ao processar requisição de missões diárias:', error.stack);
+    res.status(500).json({ error: 'Erro interno', details: error.message });
+  }
+});
+
 // Endpoint para criar troféu diário
 router.post('/trofeus-diarios', async (req, res) => {
   console.log('Requisição recebida em /trofeus-diarios:', req.body);
@@ -1016,10 +1048,13 @@ router.get('/missoes/pendentes/:paiId', async (req, res) => {
         [parseInt(paiId), 'pendente']
       );
       console.log('Missões pendentes encontradas para paiId', paiId, ':', result.rows);
+      if (result.rows.length === 0) {
+        console.warn('Nenhuma missão pendente encontrada para paiId:', paiId);
+      }
       res.status(200).json({
         missoes: result.rows.map(missao => ({
           ...missao,
-          recompensa: parseFloat(missao.valor_recompensa)
+          recompensa: parseFloat(missao.valor_recompensa || 0) // Fallback para evitar erros se valor_recompensa for null
         }))
       });
     } finally {
@@ -1051,18 +1086,24 @@ router.get('/missoes/pendentes/filho/:filhoId', async (req, res) => {
         [parseInt(filhoId), 'pendente']
       );
       console.log('Missões pendentes encontradas para filhoId', filhoId, ':', result.rows);
+      if (result.rows.length === 0) {
+        return res.status(200).json({ missoes: [], message: 'Nenhuma missão pendente encontrada' });
+      }
       res.status(200).json({
         missoes: result.rows.map(missao => ({
           ...missao,
-          recompensa: parseFloat(missao.valor_recompensa)
+          recompensa: parseFloat(missao.valor_recompensa || 0) // Fallback para evitar erros se valor_recompensa for null
         }))
       });
+    } catch (error) {
+      console.error('Erro ao listar missões pendentes da criança:', error.stack);
+      res.status(500).json({ error: 'Erro ao listar missões pendentes da criança', details: error.message });
     } finally {
       client.release();
     }
   } catch (error) {
-    console.error('Erro ao listar missões pendentes da criança:', error.stack);
-    res.status(500).json({ error: 'Erro ao listar missões pendentes da criança', details: error.message });
+    console.error('Erro ao processar requisição de missões pendentes da criança:', error.stack);
+    res.status(500).json({ error: 'Erro interno', details: error.message });
   }
 });
 
@@ -1102,7 +1143,8 @@ router.post('/missao/aprovar/:missaoId', async (req, res) => {
         return res.status(400).json({ error: 'Missão não está pendente' });
       }
 
-      const valorRecompensa = parseFloat(missao.valor_recompensa);
+      const valorRecompensa = parseFloat(missao.valor_recompensa) || 0;
+      console.log('Valor da recompensa:', valorRecompensa);
       if (isNaN(valorRecompensa) || valorRecompensa <= 0) {
         await client.query('ROLLBACK');
         return res.status(400).json({ error: 'Valor da recompensa inválido' });
@@ -1116,25 +1158,35 @@ router.post('/missao/aprovar/:missaoId', async (req, res) => {
         }
         const contaId = contaPaiResult.rows[0].id;
         const saldoPai = parseFloat(contaPaiResult.rows[0].saldo);
-
-        console.log('Verificando saldo:', { saldoPai, valorRecompensa });
+        console.log('Saldo do pai:', saldoPai);
 
         if (saldoPai < valorRecompensa) {
           await client.query('ROLLBACK');
           return res.status(400).json({ error: 'Saldo insuficiente para aprovar a missão' });
         }
 
-        await client.query(
-          'UPDATE contas SET saldo = saldo - $1 WHERE id = $2',
+        // Debitar do pai
+        const updateContaPai = await client.query(
+          'UPDATE contas SET saldo = saldo - $1 WHERE id = $2 RETURNING saldo',
           [valorRecompensa, contaId]
         );
-        await client.query(
-          'UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2',
+        console.log('Saldo do pai após débito:', updateContaPai.rows[0].saldo);
+
+        // Creditar na criança
+        const updateContaFilho = await client.query(
+          'UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2 RETURNING saldo',
           [valorRecompensa, parseInt(filho_id)]
         );
+        if (updateContaFilho.rows.length === 0) {
+          await client.query('ROLLBACK');
+          return res.status(404).json({ error: 'Conta da criança não encontrada' });
+        }
+        console.log('Saldo da criança após crédito:', updateContaFilho.rows[0].saldo);
+
+        // Registrar transação
         await client.query(
-          'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ($1, $2, $3, $4, $5)',
-          [contaId, 'transferencia', valorRecompensa, `Recompensa por missão ${missaoId}`, 'missao']
+          'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem, data_transacao) VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)',
+          [contaId, 'transferencia', valorRecompensa, `Recompensa por missão ${missaoId}`, 'missao_personalizada']
         );
       }
 
@@ -1149,7 +1201,10 @@ router.post('/missao/aprovar/:missaoId', async (req, res) => {
 
       await client.query('COMMIT');
       console.log(`Missão ${missaoId} ${aprovado ? 'aprovada' : 'rejeitada'} para filhoId ${filho_id}`);
-      res.status(200).json({ message: `Missão ${aprovado ? 'aprovada' : 'rejeitada'} com sucesso!` });
+      res.status(200).json({
+        message: `Missão ${aprovado ? 'aprovada' : 'rejeitada'} com sucesso!`,
+        saldo_atualizado: aprovado
+      });
     } catch (error) {
       await client.query('ROLLBACK');
       throw error;
@@ -1161,7 +1216,6 @@ router.post('/missao/aprovar/:missaoId', async (req, res) => {
     res.status(500).json({ error: 'Erro ao aprovar/rejeitar missão', details: error.message });
   }
 });
-
 // Endpoint para gerar relatório PDF com jsPDF
 const { jsPDF } = require('jspdf');
 router.post('/gerar-relatorio-pdf', async (req, res) => {
@@ -1289,7 +1343,6 @@ router.post('/analise-psicologica', async (req, res) => {
       const missaoData = missaoResult.rows[0];
       const textoCrianca = missaoData.descricao || 'Nenhum texto fornecido';
       const imagemPath = missaoData.imagem ? path.join(__dirname, '../', missaoData.imagem.replace(/^\/Uploads\//, 'Uploads/')) : null;
-
       const { analisarMissao } = require('../services/GeminiPsychologicalService');
       const analise = await analisarMissao({ missao: missaoData, imagemPath });
 

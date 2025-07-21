@@ -1,4 +1,3 @@
-// index.js
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
@@ -13,6 +12,7 @@ const missionRouter = require("./routes/missionRoutes");
 const desafiosRouter = require("./routes/desafios");
 const desafiosIARouter = require("./routes/desafiosIA");
 const adminRoutes = require("./routes/adminRoutes");
+const desafiosCriativosRouter = require("./routes/desafiosCriativos");
 const { executarTarefasDiarias } = require("./Agendador");
 
 const app = express();
@@ -96,7 +96,7 @@ app.use((req, res, next) => {
 });
 
 // Servir arquivos de upload com logs detalhados
-app.use("/Uploads", express.static(path.join(__dirname, "Uploads"), {
+app.use("/Uploads", express.static(path.join(__dirname, "uploads"), {
   setHeaders: (res, filePath) => {
     const ext = path.extname(filePath).toLowerCase();
     const mimeTypes = {
@@ -148,6 +148,7 @@ try {
   app.use("/mission", missionRouter);
   app.use("/auth/escola", escolaRoutes(pool));
   app.use("/admin", adminRoutes);
+  app.use("/desafios-criativos", desafiosCriativosRouter);
   console.log("Rotas carregadas com sucesso");
 } catch (error) {
   console.error("Erro ao configurar rotas:", error.message, error.stack);
