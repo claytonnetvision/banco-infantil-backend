@@ -1108,6 +1108,8 @@ router.get('/missoes/pendentes/filho/:filhoId', async (req, res) => {
 });
 
 // Endpoint para aprovar ou rejeitar missão
+// Endpoint para aprovar ou rejeitar missão
+// Endpoint para aprovar ou rejeitar missão
 router.post('/missao/aprovar/:missaoId', async (req, res) => {
   console.log('Requisição recebida em /missao/aprovar:', req.params.missaoId, req.body);
   const { missaoId } = req.params;
@@ -1159,6 +1161,7 @@ router.post('/missao/aprovar/:missaoId', async (req, res) => {
         const contaId = contaPaiResult.rows[0].id;
         const saldoPai = parseFloat(contaPaiResult.rows[0].saldo);
         console.log('Saldo do pai:', saldoPai);
+        console.log('contaId antes do débito:', contaId); // Depuração
 
         if (saldoPai < valorRecompensa) {
           await client.query('ROLLBACK');
@@ -1183,9 +1186,9 @@ router.post('/missao/aprovar/:missaoId', async (req, res) => {
         }
         console.log('Saldo da criança após crédito:', updateContaFilho.rows[0].saldo);
 
-        // Registrar transação
+        // Registrar transação (sem especificar data_transacao, usando o default)
         await client.query(
-          'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem, data_transacao) VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)',
+          'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ($1, $2, $3, $4, $5)',
           [contaId, 'transferencia', valorRecompensa, `Recompensa por missão ${missaoId}`, 'missao_personalizada']
         );
       }
