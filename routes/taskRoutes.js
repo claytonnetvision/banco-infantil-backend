@@ -12,20 +12,18 @@ cron.schedule('0 0 * * *', async () => {
     await client.query('SET search_path TO banco_infantil');
     await client.query('BEGIN');
 
-    // Excluir tarefas pendentes ou concluídas pelo filho com mais de 24 horas,
-    // exceto aquelas vinculadas a tarefas automáticas ativas
-    const deletedTarefas = await client.query(`
-      DELETE FROM tarefas
-      WHERE status IN ($1, $2)
-      AND data_criacao < CURRENT_TIMESTAMP - INTERVAL '1 day'
-      AND (tarefa_automatica_id IS NULL OR 
-           tarefa_automatica_id NOT IN (
-             SELECT id FROM tarefas_automaticas WHERE data_fim >= CURRENT_DATE
-           ))
-      RETURNING id, filho_id, descricao
-    `, ['pendente', 'concluida_pelo_filho']);
+    const deletedTarefas = await client.query(
+      `DELETE FROM tarefas
+       WHERE status IN ($1, $2)
+       AND data_criacao < CURRENT_TIMESTAMP - INTERVAL '1 day'
+       AND (tarefa_automatica_id IS NULL OR 
+            tarefa_automatica_id NOT IN (
+              SELECT id FROM tarefas_automaticas WHERE data_fim >= CURRENT_DATE
+            ))
+       RETURNING id, filho_id, descricao`,
+      ['pendente', 'concluida_pelo_filho']
+    );
 
-    // Notificar exclusão de tarefas
     for (const tarefa of deletedTarefas.rows) {
       await client.query(
         'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
@@ -85,67 +83,12 @@ router.post('/tarefa', async (req, res) => {
         [parseInt(filho_id), descricao, parseFloat(valor), 'pendente']
       );
 
-      // Atualizar progresso de missões relacionadas a tarefas
       await client.query(
-        `UPDATE missoes_personalizadas 
-         SET progresso = progresso + 1 
-         WHERE filho_id = $1 
-         AND tipo = 'tarefas' 
-         AND status = $2`,
-        [parseInt(filho_id), 'pendente']
+        `UPDATE objetivos 
+         SET valor_atual = GREATEST(0, LEAST(valor_atual + $1, valor_total)) 
+         WHERE filho_id = $2 AND status = 'pendente'`,
+        [parseFloat(valor), parseInt(filho_id)]
       );
-
-      const missaoResult = await client.query(
-        `SELECT id, progresso, meta, recompensa 
-         FROM missoes_personalizadas 
-         WHERE filho_id = $1 
-         AND tipo = 'tarefas' 
-         AND status = $2`,
-        [parseInt(filho_id), 'pendente']
-      );
-
-      if (missaoResult.rows.length > 0 && missaoResult.rows[0].progresso >= missaoResult.rows[0].meta) {
-        await client.query(
-          `UPDATE missoes_personalizadas 
-           SET status = 'aprovada' 
-           WHERE id = $1`,
-          [missaoResult.rows[0].id]
-        );
-
-        const contaPaiResult = await client.query(
-          'SELECT id, saldo FROM contas WHERE pai_id = $1',
-          [pai_id]
-        );
-        if (contaPaiResult.rows.length > 0 && contaPaiResult.rows[0].saldo >= missaoResult.rows[0].recompensa) {
-          const contaId = contaPaiResult.rows[0].id;
-          await client.query(
-            'UPDATE contas SET saldo = saldo - $1 WHERE id = $2',
-            [missaoResult.rows[0].recompensa, contaId]
-          );
-          await client.query(
-            'UPDATE contas_filhos SET saldo = saldo + $1 WHERE filho_id = $2',
-            [missaoResult.rows[0].recompensa, parseInt(filho_id)]
-          );
-          await client.query(
-            'INSERT INTO transacoes (conta_id, tipo, valor, descricao, origem) VALUES ($1, $2, $3, $4, $5)',
-            [contaId, 'transferencia', missaoResult.rows[0].recompensa, `Recompensa por missão personalizada de tarefas`, 'missao_personalizada']
-          );
-          await client.query(
-            'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
-            [parseInt(filho_id), `Você completou a missão personalizada de tarefas e ganhou R$ ${missaoResult.rows[0].recompensa.toFixed(2)}!`, new Date()]
-          );
-        }
-      }
-
-      // Atualizar progresso de objetivos
-      if (result.rows.length > 0) {
-        await client.query(
-          `UPDATE objetivos 
-           SET valor_atual = GREATEST(0, LEAST(valor_atual + $1, valor_total)) 
-           WHERE filho_id = $2 AND status = 'pendente'`,
-          [parseFloat(valor), parseInt(filho_id)]
-        );
-      }
 
       await client.query('COMMIT');
       res.status(201).json({ tarefa: result.rows[0], message: 'Tarefa cadastrada com sucesso!' });
@@ -442,7 +385,6 @@ router.post('/tarefas-automaticas', async (req, res) => {
         [parseInt(pai_id), parseInt(filho_id), descricao, parseFloat(valor), `{${dias_semana.join(',')}}`, data_inicio, data_fim, true]
       );
 
-      // Criar tarefa imediatamente, vinculando à tarefa automática
       const tarefaResult = await client.query(
         'INSERT INTO tarefas (filho_id, descricao, valor, status, data_criacao, tarefa_automatica_id) VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP, $5) RETURNING id',
         [parseInt(filho_id), descricao, parseFloat(valor), 'pendente', result.rows[0].id]
@@ -454,7 +396,7 @@ router.post('/tarefas-automaticas', async (req, res) => {
       );
 
       await client.query('COMMIT');
-      res.status(201).json({ tarefa_automatica: result.rows[0], message: 'Tarefa automática configurada com sucesso!' });
+      res.status(201).json({ tarefa_automatica: result.rows[0], tarefa: tarefaResult.rows[0], message: 'Tarefa automática configurada com sucesso!' });
     } catch (error) {
       await client.query('ROLLBACK');
       throw error;
@@ -481,19 +423,13 @@ router.get('/tarefas-automaticas/listar/:paiId', async (req, res) => {
       await client.query('BEGIN');
       await client.query('SET search_path TO banco_infantil');
 
-      // Excluir tarefas automáticas vencidas e suas tarefas associadas
       const tarefasVencidas = await client.query(
         'SELECT ta.id, ta.filho_id FROM tarefas_automaticas ta WHERE ta.pai_id = $1 AND ta.data_fim < CURRENT_DATE - INTERVAL \'1 day\'',
         [parseInt(paiId)]
       );
 
       for (const tarefa of tarefasVencidas.rows) {
-        // Remover tarefas associadas na tabela tarefas
-        await client.query(
-          'DELETE FROM tarefas WHERE tarefa_automatica_id = $1',
-          [tarefa.id]
-        );
-        // Remover a tarefa automática
+        await client.query('DELETE FROM tarefas WHERE tarefa_automatica_id = $1', [tarefa.id]);
         await client.query('DELETE FROM tarefas_automaticas WHERE id = $1', [tarefa.id]);
         await client.query(
           'INSERT INTO notificacoes (filho_id, mensagem, data_criacao) VALUES ($1, $2, $3)',
@@ -501,11 +437,9 @@ router.get('/tarefas-automaticas/listar/:paiId', async (req, res) => {
         );
       }
 
-      // Verificar estrutura da tabela para depuração
       const tableCheck = await client.query('SELECT column_name FROM information_schema.columns WHERE table_name = \'tarefas_automaticas\' AND table_schema = \'banco_infantil\'');
       console.log('Colunas da tabela tarefas_automaticas:', tableCheck.rows.map(row => row.column_name));
 
-      // Listar tarefas automáticas válidas usando criado_em para ordenação
       const result = await client.query(
         'SELECT ta.id, ta.filho_id, ta.descricao, ta.valor::float, ta.dias_semana, ta.data_inicio, ta.data_fim, ta.ativo, f.nome_completo ' +
         'FROM tarefas_automaticas ta JOIN filhos f ON ta.filho_id = f.id WHERE ta.pai_id = $1 ORDER BY ta.criado_em DESC',
@@ -586,7 +520,6 @@ router.put('/tarefas-automaticas/:id', async (req, res) => {
         [descricao, parseFloat(valor), `{${dias_semana.join(',')}}`, data_inicio, data_fim, true, id]
       );
 
-      // Criar nova tarefa vinculada à tarefa automática atualizada
       await client.query(
         'INSERT INTO tarefas (filho_id, descricao, valor, status, data_criacao, tarefa_automatica_id) VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP, $5) RETURNING id',
         [parseInt(filho_id), descricao, parseFloat(valor), 'pendente', id]
@@ -628,10 +561,7 @@ router.delete('/tarefas-automaticas/:id', async (req, res) => {
 
       const filhoId = tarefaExistente.rows[0].filho_id;
 
-      // Deletar tarefas associadas primeiro
       await client.query('DELETE FROM tarefas WHERE tarefa_automatica_id = $1', [id]);
-
-      // Agora deletar a tarefa automática
       await client.query('DELETE FROM tarefas_automaticas WHERE id = $1', [id]);
 
       await client.query(
@@ -745,7 +675,6 @@ router.post('/tarefas-automaticas/:id/aplicar-agora', async (req, res) => {
         return res.status(400).json({ error: 'Tarefa automática fora do período válido' });
       }
 
-      // Verificar se já existe uma tarefa com a mesma descrição para o filho no mesmo dia
       const tarefaExistente = await client.query(
         'SELECT id FROM tarefas WHERE filho_id = $1 AND descricao = $2 AND DATE(data_criacao) = CURRENT_DATE',
         [parseInt(tarefa.filho_id), tarefa.descricao]
@@ -857,7 +786,6 @@ router.post('/tarefas-automaticas/:id/clonar', async (req, res) => {
         ]
       );
 
-      // Criar tarefa imediatamente para a nova tarefa clonada
       await client.query(
         'INSERT INTO tarefas (filho_id, descricao, valor, status, data_criacao, tarefa_automatica_id) VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP, $5) RETURNING id',
         [parseInt(filho_id), tarefaOriginal.descricao, parseFloat(tarefaOriginal.valor), 'pendente', result.rows[0].id]
@@ -917,6 +845,182 @@ router.get('/monitoramento/:filhoId', async (req, res) => {
   } catch (error) {
     console.error('Erro ao buscar dados de monitoramento:', error.stack);
     res.status(500).json({ error: 'Erro ao buscar dados de monitoramento', details: error.message });
+  }
+});
+
+// Endpoint para buscar objetivo de um filho
+router.get('/objetivo/:filhoId', async (req, res) => {
+  const { filhoId } = req.params;
+  try {
+    if (!req.headers.authorization) {
+      return res.status(401).json({ error: 'Não autorizado' });
+    }
+    if (!filhoId || isNaN(parseInt(filhoId))) {
+      return res.status(400).json({ error: 'ID da criança inválido' });
+    }
+    const client = await pool.connect();
+    try {
+      await client.query('SET search_path TO banco_infantil');
+      const result = await client.query(
+        'SELECT id, filho_id, nome, valor_total, valor_atual, data_criacao AS data_inicio, status FROM objetivos WHERE filho_id = $1 AND status = $2',
+        [parseInt(filhoId), 'pendente']
+      );
+      console.log('Resultado da query de objetivos:', result.rows);
+      res.status(200).json({ objetivo: result.rows[0] || null });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Erro ao buscar objetivo:', error.stack);
+    res.status(500).json({ error: 'Erro ao buscar objetivo', details: error.message });
+  }
+});
+
+// Endpoint para criar objetivo
+router.post('/objetivo', async (req, res) => {
+  const { filho_id, nome, valor_total } = req.body;
+  try {
+    if (!req.headers.authorization) {
+      return res.status(401).json({ error: 'Não autorizado' });
+    }
+    if (!filho_id || !nome || !valor_total || parseFloat(valor_total) <= 0) {
+      return res.status(400).json({ error: 'Dados do objetivo incompletos ou inválidos' });
+    }
+    const client = await pool.connect();
+    try {
+      await client.query('SET search_path TO banco_infantil');
+      await client.query('BEGIN');
+      const result = await client.query(
+        'INSERT INTO objetivos (filho_id, nome, valor_total, valor_atual, data_criacao, status) VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP, $5) RETURNING id',
+        [parseInt(filho_id), nome, parseFloat(valor_total), 0, 'pendente']
+      );
+      await client.query('COMMIT');
+      res.status(201).json({ message: 'Objetivo criado com sucesso!', id: result.rows[0].id });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Erro ao criar objetivo:', error.stack);
+    res.status(500).json({ error: 'Erro ao criar objetivo', details: error.message });
+  }
+});
+
+// Endpoint para atualizar objetivo
+router.put('/objetivo/:id', async (req, res) => {
+  const { id } = req.params;
+  const { nome, valor_total, filho_id } = req.body;
+  try {
+    if (!req.headers.authorization) {
+      return res.status(401).json({ error: 'Não autorizado' });
+    }
+    if (!nome || !valor_total || parseFloat(valor_total) <= 0 || !filho_id) {
+      return res.status(400).json({ error: 'Dados do objetivo incompletos ou inválidos' });
+    }
+    const client = await pool.connect();
+    try {
+      await client.query('SET search_path TO banco_infantil');
+      await client.query('BEGIN');
+      const result = await client.query(
+        'UPDATE objetivos SET nome = $1, valor_total = $2, filho_id = $3 WHERE id = $4 AND status = $5 RETURNING id',
+        [nome, parseFloat(valor_total), parseInt(filho_id), parseInt(id), 'pendente']
+      );
+      if (result.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Objetivo não encontrado ou já concluído' });
+      }
+      await client.query('COMMIT');
+      res.status(200).json({ message: 'Objetivo atualizado com sucesso!' });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Erro ao atualizar objetivo:', error.stack);
+    res.status(500).json({ error: 'Erro ao atualizar objetivo', details: error.message });
+  }
+});
+
+// Endpoint para deletar objetivo
+router.delete('/objetivo/:id', async (req, res) => {
+  const { id } = req.params;
+  const { filho_id } = req.body;
+  try {
+    if (!req.headers.authorization) {
+      return res.status(401).json({ error: 'Não autorizado' });
+    }
+    if (!filho_id) {
+      return res.status(400).json({ error: 'ID do filho é obrigatório' });
+    }
+    const client = await pool.connect();
+    try {
+      await client.query('SET search_path TO banco_infantil');
+      await client.query('BEGIN');
+      const result = await client.query(
+        'DELETE FROM objetivos WHERE id = $1 AND filho_id = $2 AND status = $3 RETURNING id',
+        [parseInt(id), parseInt(filho_id), 'pendente']
+      );
+      if (result.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Objetivo não encontrado ou já concluído' });
+      }
+      await client.query('COMMIT');
+      res.status(200).json({ message: 'Objetivo deletado com sucesso!' });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Erro ao deletar objetivo:', error.stack);
+    res.status(500).json({ error: 'Erro ao deletar objetivo', details: error.message });
+  }
+});
+
+// Endpoint para penalizar objetivo
+router.put('/objetivo/penalizar', async (req, res) => {
+  const { filho_id, valor_penalidade } = req.body;
+  try {
+    if (!req.headers.authorization) {
+      return res.status(401).json({ error: 'Não autorizado' });
+    }
+    if (!filho_id || !valor_penalidade || parseFloat(valor_penalidade) <= 0) {
+      return res.status(400).json({ error: 'Dados da penalidade inválidos' });
+    }
+    const client = await pool.connect();
+    try {
+      await client.query('SET search_path TO banco_infantil');
+      await client.query('BEGIN');
+      const objetivoResult = await client.query(
+        'SELECT id, valor_atual, valor_total FROM objetivos WHERE filho_id = $1 AND status = $2',
+        [parseInt(filho_id), 'pendente']
+      );
+      if (objetivoResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Objetivo não encontrado' });
+      }
+      const objetivo = objetivoResult.rows[0];
+      const novoValor = Math.max(0, parseFloat(objetivo.valor_atual) - parseFloat(valor_penalidade));
+      await client.query(
+        'UPDATE objetivos SET valor_atual = $1 WHERE id = $2',
+        [novoValor, objetivo.id]
+      );
+      await client.query('COMMIT');
+      res.status(200).json({ message: `Penalidade de R$ ${parseFloat(valor_penalidade).toFixed(2)} aplicada com sucesso!` });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Erro ao penalizar objetivo:', error.stack);
+    res.status(500).json({ error: 'Erro ao penalizar objetivo', details: error.message });
   }
 });
 
