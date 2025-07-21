@@ -1,3 +1,4 @@
+// index.js
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
@@ -23,7 +24,9 @@ console.log(`API_URL configurada como: ${API_URL}`);
 // Configuração do CORS
 const allowedOrigins = [
   'http://localhost:3000', // Frontend local
-  process.env.FRONTEND_URL || 'https://www.tarefinhapaga.com.br' // Frontend em produção
+  process.env.FRONTEND_URL || 'https://www.tarefinhapaga.com.br', // Frontend em produção
+  'https://banco-infantil-frontend-clean-89f3.vercel.app', // Frontend hospedado no Vercel
+  'https://infrapower.com.br' // Domínio adicional
 ];
 
 const corsOptions = {
@@ -92,22 +95,25 @@ app.use((req, res, next) => {
   next();
 });
 
-// Servir arquivos de upload
+// Servir arquivos de upload com logs detalhados
 app.use("/Uploads", express.static(path.join(__dirname, "Uploads"), {
-  setHeaders: (res, path) => {
-    const ext = path.split('.').pop().toLowerCase();
+  setHeaders: (res, filePath) => {
+    const ext = path.extname(filePath).toLowerCase();
     const mimeTypes = {
-      'png': 'image/png',
-      'jpg': 'image/jpeg',
-      'jpeg': 'image/jpeg'
+      '.png': 'image/png',
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg'
     };
+    console.log(`Servindo arquivo: ${filePath}, Extensão: ${ext}, MIME: ${mimeTypes[ext] || 'application/octet-stream'}`);
     res.set("Content-Type", mimeTypes[ext] || 'application/octet-stream');
   },
   fallthrough: true,
 }));
-app.use("/Uploads", (req, res) => {
-  console.log(`Arquivo não encontrado: ${req.url}`);
-  res.status(404).json({ error: "Arquivo não encontrado" });
+
+// Rota de fallback para default.png
+app.get("/Uploads/default.png", (req, res) => {
+  console.log(`Arquivo default.png não encontrado. Retornando erro JSON.`);
+  res.status(404).json({ error: "Arquivo default.png não encontrado" });
 });
 
 // Testar conexão com o banco
@@ -140,7 +146,6 @@ try {
   app.use("/account", accountRouter);
   app.use("/task", taskRouter);
   app.use("/mission", missionRouter);
-  // Remover passwordRouter, pois /alterar-senha será tratado por authRouter
   app.use("/auth/escola", escolaRoutes(pool));
   app.use("/admin", adminRoutes);
   console.log("Rotas carregadas com sucesso");
