@@ -14,7 +14,7 @@ router.post('/create-preference', async (req, res) => {
       items: [
         {
           title: 'Licença Tarefinha Paga 6 meses',
-          unit_price: 1.00, // Valor pequeno pra teste
+          unit_price: 1.00, // Valor teste
           quantity: 1,
         },
       ],
@@ -26,6 +26,7 @@ router.post('/create-preference', async (req, res) => {
       },
       auto_return: 'approved',
       external_reference: userId.toString(),
+      notification_url: 'https://banco-infantil-backend.onrender.com/webhook', // Webhook correto
     };
     console.log('Corpo da preferência:', body);
     const response = await preference.create({ body });
@@ -39,7 +40,7 @@ router.post('/create-preference', async (req, res) => {
 });
 
 router.post('/check-payment', async (req, res) => {
-  const { userId } = req.body; // Mudamos de paymentId pra userId
+  const { userId } = req.body;
   try {
     const payment = new MercadoPago.Payment(mp);
     const searchResponse = await payment.search({ params: { external_reference: userId } });
@@ -68,16 +69,19 @@ router.post('/check-payment', async (req, res) => {
 });
 
 router.post('/webhook', async (req, res) => {
-  const { data } = req.body;
+  const { id, topic, external_reference } = req.body;
   try {
-    const payment = new MercadoPago.Payment(mp);
-    const paymentInfo = await payment.get({ id: data.id });
-    console.log('Webhook recebido:', paymentInfo);
-    if (paymentInfo.status === 'approved') {
-      const user = await pool.query('SELECT id, email FROM pais WHERE payment_id = $1', [paymentInfo.id]);
-      if (user.rows[0]) {
-        await pool.query('UPDATE pais SET licenca_ativa = true, data_ativacao = CURRENT_DATE, data_expiracao = CURRENT_DATE + INTERVAL \'6 months\' WHERE id = $1', [user.rows[0].id]);
-        await sendPostSignupEmail(user.rows[0].email);
+    if (topic === 'payment') {
+      const payment = new MercadoPago.Payment(mp);
+      const paymentInfo = await payment.get({ id });
+      console.log('Webhook recebido:', paymentInfo);
+      if (paymentInfo.status === 'approved') {
+        const userId = external_reference;
+        const user = await pool.query('SELECT id, email FROM pais WHERE id = $1', [userId]);
+        if (user.rows[0]) {
+          await pool.query('UPDATE pais SET licenca_ativa = true, data_ativacao = CURRENT_DATE, data_expiracao = CURRENT_DATE + INTERVAL \'6 months\' WHERE id = $1', [user.rows[0].id]);
+          await sendPostSignupEmail(user.rows[0].email);
+        }
       }
     }
     res.sendStatus(200);
