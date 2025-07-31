@@ -37,8 +37,8 @@ router.get('/users', checkAdmin, async (req, res) => {
   try {
     client = await pool.connect();
     await client.query('SET search_path TO banco_infantil');
-    const paisResult = await client.query('SELECT id, nome_completo, email, senha, COALESCE(tipo, \'pai\') AS tipo, ativo, data_criacao FROM pais');
-    const filhosResult = await client.query('SELECT id, nome_completo, email, senha, COALESCE(tipo, \'filho\') AS tipo, pai_id, ativo, data_criacao FROM filhos');
+    const paisResult = await client.query('SELECT id, nome_completo, email, senha, tipo, ativo, data_criacao FROM pais');
+    const filhosResult = await client.query('SELECT id, nome_completo, email, senha, tipo, pai_id, ativo, data_criacao FROM filhos');
     const allUsers = [...paisResult.rows, ...filhosResult.rows];
     if (allUsers.length === 0) {
       return res.status(200).json({ users: [], message: 'Nenhum usuário encontrado' });
@@ -104,11 +104,11 @@ router.put('/user/update', checkAdmin, async (req, res) => {
     client = await pool.connect();
     let query, params;
     if (tipo === 'pai') {
-      query = 'UPDATE pais SET nome_completo = $1, email = $2, senha = $3, telefone = $4, cpf = COALESCE($5, \'\'), ativo = $6 WHERE id = $7';
-      params = [nome_completo, email, senha, telefone, cpf, ativo !== undefined ? ativo : true, id];
+      query = 'UPDATE pais SET nome_completo = $1, email = $2, senha = $3, telefone = $4, cpf = COALESCE($5, \'\'), ativo = $6, tipo = $7 WHERE id = $8';
+      params = [nome_completo, email, senha, telefone, cpf, ativo !== undefined ? ativo : true, 'pai', id];
     } else if (tipo === 'filho') {
-      query = 'UPDATE filhos SET nome_completo = $1, email = $2, senha = $3, telefone = $4, pai_id = $5, ativo = $6 WHERE id = $7';
-      params = [nome_completo, email, senha, telefone, pai_id || null, ativo !== undefined ? ativo : true, id];
+      query = 'UPDATE filhos SET nome_completo = $1, email = $2, senha = $3, telefone = $4, pai_id = $5, ativo = $6, tipo = $7 WHERE id = $8';
+      params = [nome_completo, email, senha, telefone, pai_id || null, ativo !== undefined ? ativo : true, 'filho', id];
     }
     await client.query(query, params);
     res.status(200).json({ message: 'Usuário atualizado com sucesso!' });
@@ -308,7 +308,6 @@ router.get('/backup', checkAdmin, async (req, res) => {
   try {
     client = await pool.connect();
     // Nota: Isso requer pg_dump configurado no servidor Render (não suportado diretamente no free tier)
-    // Exemplo teórico - implemente com cuidado em um ambiente pago
     res.status(501).json({ message: 'Backup não suportado no plano free. Configure pg_dump em um ambiente pago.' });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -364,7 +363,9 @@ router.post('/db/query', checkAdmin, async (req, res) => {
     if (client) client.release();
   }
 });
-router.put('/user/activate-license', async (req, res) => {
+
+// Activate license
+router.put('/user/activate-license', checkAdmin, async (req, res) => {
   const { id, tipo } = req.body;
   const client = await pool.connect();
   try {
@@ -386,6 +387,7 @@ router.put('/user/activate-license', async (req, res) => {
     client.release();
   }
 });
+
 // Export users
 router.get('/users/export', checkAdmin, async (req, res) => {
   let client;
@@ -401,6 +403,55 @@ router.get('/users/export', checkAdmin, async (req, res) => {
     res.status(200).send(csv);
   } catch (err) {
     res.status(500).json({ error: err.message });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// Update price
+router.post('/update-price', checkAdmin, async (req, res) => {
+  const { price } = req.body;
+  if (!price || isNaN(price) || price <= 0) {
+    return res.status(400).json({ error: 'Preço inválido. Deve ser um número positivo.' });
+  }
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('SET search_path TO banco_infantil');
+    // Verifica se a tabela config existe, senão cria
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS config (
+        id SERIAL PRIMARY KEY,
+        key VARCHAR(50) UNIQUE,
+        value DECIMAL
+      )
+    `);
+    // Atualiza ou insere o preço
+    const result = await client.query(
+      'INSERT INTO config (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2',
+      ['license_price', price]
+    );
+    res.status(200).json({ message: 'Preço atualizado com sucesso!', price });
+  } catch (err) {
+    console.error('Erro ao atualizar preço:', err.stack);
+    res.status(500).json({ error: 'Erro ao atualizar preço', details: err.message });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+// Fetch price (opcional, pra exibir o preço atual no admin)
+router.get('/price', checkAdmin, async (req, res) => {
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('SET search_path TO banco_infantil');
+    const result = await client.query('SELECT value FROM config WHERE key = $1', ['license_price']);
+    const price = result.rows.length > 0 ? result.rows[0].value : 1.00; // Padrão R$1.00
+    res.status(200).json({ price });
+  } catch (err) {
+    console.error('Erro ao buscar preço:', err.stack);
+    res.status(500).json({ error: 'Erro ao buscar preço', details: err.message });
   } finally {
     if (client) client.release();
   }
