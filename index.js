@@ -66,8 +66,7 @@ const pool = new Pool({
   },
   max: 20,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 30000,
-  query: 'SET search_path TO banco_infantil'
+  connectionTimeoutMillis: 30000
 });
 
 // Armazenar o pool no app para uso nas rotas
@@ -96,7 +95,7 @@ app.use((req, res, next) => {
 });
 
 // Servir arquivos de upload com logs detalhados
-app.use("/Uploads", express.static(path.join(__dirname, "uploads"), {
+app.use("/Uploads", express.static(path.join(__dirname, "Uploads"), {
   setHeaders: (res, filePath) => {
     const ext = path.extname(filePath).toLowerCase();
     const mimeTypes = {
@@ -149,6 +148,7 @@ try {
   app.use("/auth/escola", escolaRoutes(pool));
   app.use("/admin", adminRoutes);
   app.use("/desafios-criativos", desafiosCriativosRouter);
+  app.use("/payment", require("./routes/paymentRoutes")); // Adição para Mercado Pago
   console.log("Rotas carregadas com sucesso");
 } catch (error) {
   console.error("Erro ao configurar rotas:", error.message, error.stack);
@@ -237,6 +237,44 @@ app.delete("/desafios/conjunto/:conjuntoId", async (req, res) => {
   } catch (err) {
     console.error("Erro na conexão ao excluir conjunto:", err.message);
     res.status(500).json({ error: "Erro interno ao excluir conjunto", details: err.message });
+  }
+});
+
+// Rota de teste para email
+app.get('/test-email', async (req, res) => {
+  const { sendVerificationEmail } = require('./services/emailService');
+  try {
+    await sendVerificationEmail('suporte@tarefinhapaga.com.br', 'teste-token-123');
+    res.json({ message: 'Email de teste enviado para suporte@tarefinhapaga.com.br' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Rota de teste para PIX
+app.get('/test-pix', async (req, res) => {
+  const { pool } = require('./db');
+  const MercadoPago = require('mercadopago');
+  const mp = new MercadoPago.MercadoPagoConfig({ accessToken: process.env.MP_ACCESS_TOKEN });
+  console.log('Tentando criar pagamento com token:', process.env.MP_ACCESS_TOKEN);
+  try {
+    const payment = new MercadoPago.Payment(mp);
+    const body = {
+      transaction_amount: 19.99,
+      description: 'Licença Tarefinha Paga 6 meses (teste)',
+      payment_method_id: 'pix',
+      payer: { email: 'test_user_558610317@testuser.com' }
+    };
+    console.log('Corpo da requisição:', body);
+    const response = await payment.create({ body });
+    console.log('Resposta da API:', response);
+    const qrCode = response.point_of_interaction.transaction_data.qr_code;
+    const pixCode = response.point_of_interaction.transaction_data.qr_code_base64;
+    await pool.query('UPDATE pais SET payment_id = $1 WHERE id = 28', [response.id]);
+    res.json({ qrCode, pixCode, paymentId: response.id });
+  } catch (error) {
+    console.error('Erro na API do Mercado Pago:', error.message, error.stack);
+    res.status(500).json({ error: error.message });
   }
 });
 

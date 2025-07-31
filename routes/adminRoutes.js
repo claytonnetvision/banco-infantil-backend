@@ -364,7 +364,28 @@ router.post('/db/query', checkAdmin, async (req, res) => {
     if (client) client.release();
   }
 });
-
+router.put('/user/activate-license', async (req, res) => {
+  const { id, tipo } = req.body;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SET search_path TO banco_infantil');
+    const table = tipo === 'pai' ? 'pais' : 'filhos';
+    const result = await client.query(
+      `UPDATE ${table} SET licenca_ativa = true, data_ativacao = CURRENT_DATE, data_expiracao = CURRENT_DATE + INTERVAL '6 months' WHERE id = $1 RETURNING *`,
+      [id]
+    );
+    if (result.rows.length === 0) {
+      throw new Error('Usuário não encontrado');
+    }
+    res.json({ message: 'Licença ativada com sucesso!' });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
 // Export users
 router.get('/users/export', checkAdmin, async (req, res) => {
   let client;
