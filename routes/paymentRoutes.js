@@ -10,11 +10,14 @@ router.post('/create-preference', async (req, res) => {
   const { email, userId } = req.body;
   try {
     const preference = new MercadoPago.Preference(mp);
+    // Busca o preço atual na tabela config
+    const configResult = await pool.query('SELECT value FROM config WHERE key = $1', ['license_price']);
+    const price = configResult.rows.length > 0 ? configResult.rows[0].value : 19.99; // Fallback pra R$19.99 se não houver valor
     const body = {
       items: [
         {
           title: 'Licença Tarefinha Paga 6 meses',
-          unit_price: 1.00, // Valor teste
+          unit_price: price, // Usa o valor do banco
           quantity: 1,
         },
       ],
