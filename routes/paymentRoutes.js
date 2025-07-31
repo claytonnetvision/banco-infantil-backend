@@ -8,16 +8,25 @@ const mp = new MercadoPago.MercadoPagoConfig({ accessToken: process.env.MP_ACCES
 
 router.post('/create-preference', async (req, res) => {
   const { email, userId } = req.body;
+  console.log('Requisição create-preference recebida:', { email, userId });
+
+  if (!email || !userId) {
+    console.error('Dados inválidos:', { email, userId });
+    return res.status(400).json({ error: 'Email e userId são obrigatórios' });
+  }
+
   try {
     const preference = new MercadoPago.Preference(mp);
     // Busca o preço atual na tabela config
     const configResult = await pool.query('SELECT value FROM config WHERE key = $1', ['license_price']);
-    const price = configResult.rows.length > 0 ? configResult.rows[0].value : 19.99; // Fallback pra R$19.99 se não houver valor
+    const price = configResult.rows.length > 0 ? configResult.rows[0].value : 19.99; // Fallback pra R$19.99
+    console.log('Preço obtido do banco:', price);
+
     const body = {
       items: [
         {
           title: 'Licença Tarefinha Paga 6 meses',
-          unit_price: price, // Usa o valor do banco
+          unit_price: price,
           quantity: 1,
         },
       ],
@@ -29,16 +38,17 @@ router.post('/create-preference', async (req, res) => {
       },
       auto_return: 'approved',
       external_reference: userId.toString(),
-      notification_url: 'https://banco-infantil-backend.onrender.com/webhook', // Webhook correto
+      notification_url: 'https://banco-infantil-backend.onrender.com/webhook',
     };
-    console.log('Corpo da preferência:', body);
+    console.log('Corpo da preferência enviado:', body);
+
     const response = await preference.create({ body });
-    console.log('Resposta da API:', response);
+    console.log('Resposta da API do Mercado Pago:', response);
     await pool.query('UPDATE pais SET payment_id = $1 WHERE id = $2', [response.id, userId]);
     res.json({ preferenceId: response.id, redirectUrl: response.init_point });
   } catch (error) {
-    console.error('Erro na API do Mercado Pago:', error.message, error.stack);
-    res.status(500).json({ error: error.message });
+    console.error('Erro na API do Mercado Pago ou no backend:', error.message, error.stack);
+    res.status(500).json({ error: 'Erro interno ao criar preferência de pagamento', details: error.message });
   }
 });
 
