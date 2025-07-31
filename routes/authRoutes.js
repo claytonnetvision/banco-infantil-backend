@@ -4,7 +4,6 @@ const { pool } = require('../db');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { sendVerificationEmail, sendPostSignupEmail } = require('../services/emailService');
-const axios = require('axios'); // Adiciona axios pra chamar /payment/create-preference
 
 console.log('Carregando authRoutes.js');
 
@@ -50,11 +49,11 @@ router.post('/login', async (req, res) => {
 
       if (user.tipo === 'pai') {
         if (!user.verified) {
-          return res.status(403).json({ error: 'Verifique seu email antes de logar' });
+          return res.status(403).json({ error: 'Você já se cadastrou. Valide seu email e volte para o login.' });
         }
         const now = new Date();
-        if (user.trial_end < now && (!user.licenca_ativa || user.data_expiracao < now)) {
-          return res.status(403).json({ error: 'Licença expirada. Ative para continuar' });
+        if (user.trial_end && user.trial_end < now && (!user.licenca_ativa || (user.data_expiracao && user.data_expiracao < now))) {
+          return res.status(403).json({ error: 'Trial expirado. Efetue o pagamento para continuar.' });
         }
       }
 
@@ -138,27 +137,10 @@ router.post('/cadastro', async (req, res) => {
       await sendVerificationEmail(pai.email, verificationToken);
       await sendPostSignupEmail(pai.email);
 
-      // Chamar API de preferência de pagamento
-      const preferenceResponse = await axios.post('http://localhost:5000/payment/create-preference', {
-        email: pai.email,
-        userId: paiId
+      res.status(201).json({
+        message: 'Cadastro realizado com sucesso! Valide seu email e volte para o login.',
+        redirectUrl: '/login'
       });
-      const { redirectUrl } = preferenceResponse.data;
-
-      const user = {
-        id: paiId,
-        nome_completo: pai.nome_completo,
-        email: pai.email,
-        tipo: 'pai',
-        data_criacao: new Date()
-      };
-      const token = jwt.sign(
-        { id: user.id, tipo: user.tipo, email: user.email, data_criacao: user.data_criacao },
-        JWT_SECRET,
-        { expiresIn: '1h' }
-      );
-
-      res.status(201).json({ user, token, redirectUrl, message: 'Cadastro realizado com sucesso! Redirecionando para pagamento.' });
     } catch (error) {
       await client.query('ROLLBACK');
       console.error('Erro ao cadastrar:', error.stack);
