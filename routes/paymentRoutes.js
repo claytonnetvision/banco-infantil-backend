@@ -15,10 +15,28 @@ router.post('/create-preference', async (req, res) => {
     return res.status(400).json({ error: 'Email e userId são obrigatórios' });
   }
 
+  let client;
   try {
+    client = await pool.connect();
+    await client.query('SET search_path TO banco_infantil');
+
+    // Cria a tabela config se não existir
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS config (
+        id SERIAL PRIMARY KEY,
+        key VARCHAR(50) UNIQUE,
+        value DECIMAL
+      )
+    `);
+    // Insere ou atualiza o preço padrão se não existir
+    await client.query(
+      'INSERT INTO config (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2',
+      ['license_price', 19.99]
+    );
+
     const preference = new MercadoPago.Preference(mp);
     // Busca o preço atual na tabela config
-    const configResult = await pool.query('SELECT value FROM config WHERE key = $1', ['license_price']);
+    const configResult = await client.query('SELECT value FROM config WHERE key = $1', ['license_price']);
     const price = configResult.rows.length > 0 ? parseFloat(configResult.rows[0].value) : 19.99; // Converte pra número
     console.log('Preço obtido do banco (convertido):', price);
 
@@ -26,7 +44,7 @@ router.post('/create-preference', async (req, res) => {
       items: [
         {
           title: 'Licença Tarefinha Paga 6 meses',
-          unit_price: price, // Agora como número
+          unit_price: price,
           quantity: 1,
         },
       ],
@@ -44,11 +62,13 @@ router.post('/create-preference', async (req, res) => {
 
     const response = await preference.create({ body });
     console.log('Resposta da API do Mercado Pago:', response);
-    await pool.query('UPDATE pais SET payment_id = $1 WHERE id = $2', [response.id, userId]);
+    await client.query('UPDATE pais SET payment_id = $1 WHERE id = $2', [response.id, userId]);
     res.json({ preferenceId: response.id, redirectUrl: response.init_point });
   } catch (error) {
     console.error('Erro na API do Mercado Pago ou no backend:', error.message, error.stack);
     res.status(500).json({ error: 'Erro interno ao criar preferência de pagamento', details: error.message });
+  } finally {
+    if (client) client.release();
   }
 });
 
